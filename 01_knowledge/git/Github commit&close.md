@@ -79,3 +79,66 @@ git branch -d feature/import-test
 Удалённо (не обязательно, но хорошо):
 
 git push origin --delete feature/import-test
+
+GitHub уже удалил ветки, но локальный Git ещё помнит старые remote-refs.
+Нужно сделать очистку ссылок.
+
+Это как раз ещё один уровень понимания среды.
+
+📍Почему так происходит
+
+Git хранит remote-ветки локально как ссылки:
+
+origin/feature/roadmap-depth-model
+origin/feature/vibecode-base
+
+Даже если на GitHub их уже нет.
+
+Пока ты не сделаешь обновление, Git считает, что они есть.
+
+📍Правильная команда очистки
+git fetch --prune
+
+или короче
+
+git remote prune origin
+
+Обе команды нормальные, но чаще используют первую.
+
+📍Что делает fetch --prune
+fetch  → обновляет remote refs
+prune  → удаляет несуществующие ветки
+
+То есть:
+
+GitHub → список веток
+Git → обновляет локальные ссылки
+📍После этого проверить
+git branch -r
+
+Должно остаться:
+
+origin/main
+origin/HEAD -> origin/main
+
+Мы закрыли цикл правильно:
+
+feature → commit → push
+
+PR → merge
+
+pull → sync
+
+delete local
+
+delete remote
+
+prune
+
+
+Шаг 1 — новая ветка
+
+По правилам системы:
+
+git checkout -b feature/import-mechanics
+git checkout -b feature/level1-execution-model
