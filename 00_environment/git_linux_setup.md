@@ -47,6 +47,10 @@ git --version
 ```bash
 git config --global user.name "Имя"
 git config --global user.email "email@example.com"
+
+git config --global user.name "AG-C137"
+git config --global user.email "gamarnick@gmail.com"
+
 ```
 
 Проверка:
