@@ -42,6 +42,7 @@ git push
 или если первый push
 
 git push -u origin feature/import-test
+git push -u origin feature/level1-execution-model
 📍Шаг 4 — Pull Request
 
 На GitHub / GitLab:
@@ -142,3 +143,4 @@ prune
 
 git checkout -b feature/import-mechanics
 git checkout -b feature/level1-execution-model
+git checkout -b feature/level1-import-system
