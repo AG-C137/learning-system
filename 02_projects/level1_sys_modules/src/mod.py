@@ -1,0 +1,3 @@
+print("mod loaded")
+
+data = []
