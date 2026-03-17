@@ -1,13 +1,13 @@
 # Learning System — Depth Model
 
 ## Level 0 — Environment Control
-- [ ] Git workflow mastery
-- [ ] Branch discipline
-- [ ] Virtual environments
-- [ ] Project structure logic
+- [x] Git workflow mastery
+- [x] Branch discipline
+- [x] Virtual environments
+- [x] Project structure logic
 
 ## Level 1 — Python Internals
-- [ ] Execution model
+- [x] Execution model
 - [ ] Imports and modules
 - [ ] Namespaces
 - [ ] Memory model
