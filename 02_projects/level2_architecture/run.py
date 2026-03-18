@@ -6,6 +6,6 @@ SRC = ROOT / "src"
 
 sys.path.insert(0, str(SRC))
 
-from app.main import main
+from app.main import main # type: ignore
 
 main()
