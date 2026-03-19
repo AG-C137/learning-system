@@ -1,0 +1,10 @@
+pyproject.toml
+src/app/__init__.py
+src/app/cli/__init__.py
+src/app/cli/main.py
+src/app/core/__init__.py
+src/app/core/greet.py
+src/learning_app.egg-info/PKG-INFO
+src/learning_app.egg-info/SOURCES.txt
+src/learning_app.egg-info/dependency_links.txt
+src/learning_app.egg-info/top_level.txt
