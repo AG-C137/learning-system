@@ -20,6 +20,7 @@ git branch
 ```
 git add .
 git commit -m "import mechanics experiment"
+
 ```
 Коммит должен быть осмысленный, по теме.
 
@@ -32,6 +33,7 @@ git push
 git push -u origin feature/import-test
 git push -u origin feature/level1-execution-model
 git push -u origin feature/level1-sys-modules
+git push -u origin feature/level2_package_install
 ```
 📍Шаг 4 — Pull Request
 
