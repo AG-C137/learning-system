@@ -4,6 +4,8 @@
 # Python cache
 __pycache__/
 *.pyc
+*.pyo
+*.pyd
 
 # VS Code
 .vscode/
@@ -11,5 +13,10 @@ __pycache__/
 # OS files
 .DS_Store
 
-# Book library builder
-data/index/books.db
+# Databases
+*.db
+*.sqlite
+*.sqlite3
+
+# Book library builder data
+02_projects/book_library_builder/data/
