@@ -1,7 +1,0 @@
-[project]
-name = "booklib"
-version = "0.1.0"
-
-dependencies = [
-    "pyyaml"
-]
