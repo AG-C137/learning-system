@@ -1,0 +1,23 @@
+[
+  {
+    "name": "b",
+    "path": "books/b.fb2",
+    "ext": ".fb2",
+    "title": "Test Book",
+    "author": "Ivan Petrov"
+  },
+  {
+    "name": "a",
+    "path": "books/a.pdf",
+    "ext": ".pdf",
+    "title": "a",
+    "author": null
+  },
+  {
+    "name": "test",
+    "path": "books/test.txt",
+    "ext": ".txt",
+    "title": null,
+    "author": null
+  }
+]
