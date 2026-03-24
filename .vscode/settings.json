@@ -1,0 +1,7 @@
+{
+    "window.zoomLevel": 3,
+    "editor.fontSize": 16,
+    "python.analysis.extraPaths": [
+        "./02_projects/book_library_builder/src"
+    ]
+}
