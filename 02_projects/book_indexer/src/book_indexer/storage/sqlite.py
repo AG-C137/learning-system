@@ -20,23 +20,34 @@ def save_index_sqlite(books, db_path, source_dir):
             ext TEXT,
             title TEXT,
             author TEXT,
-            source_dir TEXT
+            source_dir TEXT,
+            size INTEGER,
+            mtime REAL
         )
         """
     )
 
-    # ✅ NEW — clean old records for this source
-    cur.execute(
-        "DELETE FROM books WHERE source_dir = ?",
-        (str(source_dir),),
-    )
-
-    # insert new records
     for b in books:
+
+        p = Path(b.path)
+        st = p.stat()
+
+        size = st.st_size
+        mtime = st.st_mtime
+
         cur.execute(
             """
-            INSERT OR REPLACE INTO books(path, name, ext, title, author, source_dir)
-            VALUES (?, ?, ?, ?, ?, ?)
+            INSERT OR REPLACE INTO books(
+                path,
+                name,
+                ext,
+                title,
+                author,
+                source_dir,
+                size,
+                mtime
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 str(b.path),
@@ -45,8 +56,34 @@ def save_index_sqlite(books, db_path, source_dir):
                 b.title,
                 b.author,
                 str(source_dir),
+                size,
+                mtime,
             ),
         )
+
+    conn.commit()
+    conn.close()
+
+def init_db(db_path):
+    db_path = str(Path(db_path).resolve())
+
+    conn = sqlite3.connect(db_path)
+    cur = conn.cursor()
+
+    cur.execute(
+        """
+        CREATE TABLE IF NOT EXISTS books (
+            path TEXT PRIMARY KEY,
+            name TEXT,
+            ext TEXT,
+            title TEXT,
+            author TEXT,
+            source_dir TEXT,
+            size INTEGER,
+            mtime REAL
+        )
+        """
+    )
 
     conn.commit()
     conn.close()
