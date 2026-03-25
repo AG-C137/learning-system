@@ -10,7 +10,6 @@ def save_index_sqlite(books, db_path, source_dir):
     print("DB PATH =", db_path)
 
     conn = sqlite3.connect(db_path)
-
     cur = conn.cursor()
 
     cur.execute(
@@ -26,8 +25,13 @@ def save_index_sqlite(books, db_path, source_dir):
         """
     )
 
- 
+    # ✅ NEW — clean old records for this source
+    cur.execute(
+        "DELETE FROM books WHERE source_dir = ?",
+        (str(source_dir),),
+    )
 
+    # insert new records
     for b in books:
         cur.execute(
             """
