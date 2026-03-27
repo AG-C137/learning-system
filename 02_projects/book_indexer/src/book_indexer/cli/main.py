@@ -1,27 +1,37 @@
 import sys
+import time
 
 from book_indexer.scan.filesystem import scan_directory
 from book_indexer.core.builder import build_book
+from book_indexer.storage.sqlite import cleanup_missing_books
 from book_indexer.storage.sqlite import save_index_sqlite
 from book_indexer.storage.search import search_books
 from book_indexer.storage.sqlite import init_db
+from book_indexer.storage.sqlite import mark_seen_bulk
 
 DB_PATH = "index.db"
 
 def index(path: str):
     init_db(DB_PATH)
+    current_run = time.time()
 
     files = scan_directory(path)
 
-    print("FILES =", files)   # ← добавить
-
     books = []
+    paths = []
 
     for f in files:
-        books.append(build_book(f, DB_PATH))
+        paths.append(str(f))
 
-    save_index_sqlite(books, DB_PATH, path)
+        book = build_book(f, DB_PATH)
+        if book:
+            books.append(book)
 
+    save_index_sqlite(books, DB_PATH, path, current_run)
+
+    mark_seen_bulk(paths, DB_PATH, current_run)
+
+    cleanup_missing_books(DB_PATH, path, current_run)
 
 def search(text: str):
     rows = search_books(DB_PATH, text)

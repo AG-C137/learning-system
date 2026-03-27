@@ -4,14 +4,11 @@ from pathlib import Path
 from book_indexer.core.book import Book
 
 
-def save_index_sqlite(books, db_path, source_dir):
-    db_path = str(Path(db_path).resolve())
+def _normalize_path(path: str) -> str:
+    return str(Path(path).resolve())
 
-    print("DB PATH =", db_path)
 
-    conn = sqlite3.connect(db_path)
-    cur = conn.cursor()
-
+def _create_books_table(cur):
     cur.execute(
         """
         CREATE TABLE IF NOT EXISTS books (
@@ -22,10 +19,30 @@ def save_index_sqlite(books, db_path, source_dir):
             author TEXT,
             source_dir TEXT,
             size INTEGER,
-            mtime REAL
+            mtime REAL,
+            last_seen REAL
         )
         """
     )
+
+
+def _ensure_last_seen_column(cur):
+    cur.execute("PRAGMA table_info(books)")
+    columns = {row[1] for row in cur.fetchall()}
+
+    if "last_seen" not in columns:
+        cur.execute("ALTER TABLE books ADD COLUMN last_seen REAL")
+
+
+def save_index_sqlite(books, db_path, source_dir, current_run):
+    db_path = _normalize_path(db_path)
+    source_dir = _normalize_path(source_dir)
+
+    conn = sqlite3.connect(db_path)
+    cur = conn.cursor()
+
+    _create_books_table(cur)
+    _ensure_last_seen_column(cur)
 
     for b in books:
 
@@ -45,9 +62,10 @@ def save_index_sqlite(books, db_path, source_dir):
                 author,
                 source_dir,
                 size,
-                mtime
+                mtime,
+                last_seen
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 str(b.path),
@@ -55,34 +73,59 @@ def save_index_sqlite(books, db_path, source_dir):
                 b.extension,
                 b.title,
                 b.author,
-                str(source_dir),
+                source_dir,
                 size,
                 mtime,
+                current_run,
             ),
         )
 
     conn.commit()
     conn.close()
 
-def init_db(db_path):
-    db_path = str(Path(db_path).resolve())
+
+def cleanup_missing_books(db_path, source_dir, current_run):
+    db_path = _normalize_path(db_path)
+    source_dir = _normalize_path(source_dir)
 
     conn = sqlite3.connect(db_path)
     cur = conn.cursor()
 
+    _create_books_table(cur)
+    _ensure_last_seen_column(cur)
+
     cur.execute(
         """
-        CREATE TABLE IF NOT EXISTS books (
-            path TEXT PRIMARY KEY,
-            name TEXT,
-            ext TEXT,
-            title TEXT,
-            author TEXT,
-            source_dir TEXT,
-            size INTEGER,
-            mtime REAL
-        )
-        """
+        DELETE FROM books
+        WHERE source_dir = ?
+          AND (last_seen IS NULL OR last_seen < ?)
+        """,
+        (source_dir, current_run),
+    )
+
+    conn.commit()
+    conn.close()
+
+
+def init_db(db_path):
+    db_path = _normalize_path(db_path)
+
+    conn = sqlite3.connect(db_path)
+    cur = conn.cursor()
+
+    _create_books_table(cur)
+    _ensure_last_seen_column(cur)
+
+    conn.commit()
+    conn.close()
+
+def mark_seen_bulk(paths, db_path, current_run):
+    conn = sqlite3.connect(db_path)
+    cur = conn.cursor()
+
+    cur.executemany(
+        "UPDATE books SET last_seen = ? WHERE path = ?",
+        [(current_run, _normalize_path(p)) for p in paths],
     )
 
     conn.commit()
