@@ -6,88 +6,86 @@ Project: 02_projects/book_indexer
 
 ## Current state
 
-Working CLI tool:
+## Book Indexer — Summary (checkpoint)
 
-book-index index <dir>
-book-index search <text>
+### Архитектура
 
-Editable install:
+Проект построен по слоям:
 
-pip install -e .
+* scan → находит файлы
+* build → создаёт Book + решает skip (size + mtime)
+* storage → SQLite
 
-## Project structure
+Слои не смешиваются.
 
-book_indexer/
+---
 
-src/book_indexer/
+### Текущие возможности
 
-cli/main.py  
-core/book.py  
-core/builder.py  
+* сканирование директории
+* registry парсеров
+* модель Book
+* SQLite storage
+* CLI (book-index)
+* editable install
 
-scan/filesystem.py  
+---
 
-parsers/registry.py  
-parsers/fb2_parser.py  
-parsers/pdf_parser.py  
-parsers/txt_parser.py  
+### Incremental поведение (инвариант)
 
-storage/sqlite.py  
-storage/search.py  
+* файлы не перерабатываются, если size + mtime не изменились
+* при этом они ДОЛЖНЫ оставаться в базе
 
-index.db
+---
 
-## Implemented
+### Реализован cleanup (mark-and-sweep)
 
-✔ scan directory
-✔ extension filter
-✔ parser registry
-✔ Book model
-✔ builder
-✔ sqlite storage
-✔ init_db
-✔ get_book_record
-✔ size / mtime
-✔ incremental skip unchanged
-✔ CLI commands
-✔ entry point book-index
-✔ editable install
-✔ multi directory index
+Добавлено:
 
-## Database schema
+* поле last_seen
+* run_id (current_run)
 
-books:
+Логика:
 
-path TEXT PRIMARY KEY
-name TEXT
-ext TEXT
-title TEXT
-author TEXT
-source_dir TEXT
-size INTEGER
-mtime REAL
+1. каждый запуск генерирует current_run
+2. новые/изменённые файлы → upsert + last_seen
+3. ВСЕ файлы → mark_seen_bulk (обновление last_seen)
+4. cleanup:
+   DELETE WHERE last_seen < current_run
 
-## Current behavior
+---
 
-book-index index books
+### Критический фикс
 
-adds files
+Исправлена ошибка:
 
-book-index index books again
+* раньше skip-файлы не обновляли last_seen
+* это приводило к их удалению
 
-skips unchanged files
+Решение:
 
-## Next steps
+* добавлен mark_seen_bulk(paths, ...)
 
-- last_seen
-- delete missing files
-- multi source clean
-- config file
-- hash
-- full text search
-- embeddings
+---
 
-## Status
+### Текущее состояние
 
-Stable.
-Safe to continue.
+✔ incremental работает
+✔ cleanup безопасен
+✔ повторные запуски стабильны
+✔ удаление/добавление файлов корректно отражается
+
+Проект достиг уровня "production-safe core".
+
+---
+
+### Следующий шаг
+
+Добавить логирование изменений:
+
+* added
+* updated
+* removed
+* unchanged
+
+Без изменения архитектуры.
