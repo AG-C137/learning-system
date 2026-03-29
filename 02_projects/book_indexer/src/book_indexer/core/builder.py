@@ -4,8 +4,16 @@ from book_indexer.core.book import Book
 from book_indexer.parsers.registry import get_parser
 
 
+def build_book(path: Path, existing_meta=None):
+    st = path.stat()
+    size = st.st_size
+    mtime = st.st_mtime
 
-def build_book(path: Path, db_path: str):
+    if existing_meta is not None:
+        old_size, old_mtime = existing_meta
+        if old_size == size and old_mtime == mtime:
+            return None, "unchanged"
+
     book = Book(path)
 
     parser = get_parser(book.extension)
@@ -13,4 +21,7 @@ def build_book(path: Path, db_path: str):
     if parser:
         parser(book)
 
-    return book
+    if existing_meta is None:
+        return book, "added"
+
+    return book, "updated"

@@ -34,6 +34,30 @@ def _ensure_last_seen_column(cur):
         cur.execute("ALTER TABLE books ADD COLUMN last_seen REAL")
 
 
+def get_book_file_info(path, db_path):
+    db_path = _normalize_path(db_path)
+
+    conn = sqlite3.connect(db_path)
+    cur = conn.cursor()
+
+    _create_books_table(cur)
+    _ensure_last_seen_column(cur)
+
+    cur.execute(
+        """
+        SELECT size, mtime
+        FROM books
+        WHERE path = ?
+        """,
+        (str(path),),
+    )
+
+    row = cur.fetchone()
+
+    conn.close()
+    return row
+
+
 def save_index_sqlite(books, db_path, source_dir, current_run):
     db_path = _normalize_path(db_path)
     source_dir = _normalize_path(source_dir)
@@ -43,14 +67,29 @@ def save_index_sqlite(books, db_path, source_dir, current_run):
 
     _create_books_table(cur)
     _ensure_last_seen_column(cur)
+    stats = {"added": 0, "updated": 0}
 
     for b in books:
-
         p = Path(b.path)
         st = p.stat()
 
         size = st.st_size
         mtime = st.st_mtime
+        book_path = str(b.path)
+
+        cur.execute(
+            """
+            SELECT 1
+            FROM books
+            WHERE path = ?
+            """,
+            (book_path,),
+        )
+
+        if cur.fetchone() is None:
+            stats["added"] += 1
+        else:
+            stats["updated"] += 1
 
         cur.execute(
             """
@@ -68,7 +107,7 @@ def save_index_sqlite(books, db_path, source_dir, current_run):
             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
-                str(b.path),
+                book_path,
                 b.name,
                 b.extension,
                 b.title,
@@ -82,6 +121,7 @@ def save_index_sqlite(books, db_path, source_dir, current_run):
 
     conn.commit()
     conn.close()
+    return stats
 
 
 def cleanup_missing_books(db_path, source_dir, current_run):
@@ -103,8 +143,11 @@ def cleanup_missing_books(db_path, source_dir, current_run):
         (source_dir, current_run),
     )
 
+    removed = cur.rowcount
+
     conn.commit()
     conn.close()
+    return removed
 
 
 def init_db(db_path):
@@ -119,13 +162,14 @@ def init_db(db_path):
     conn.commit()
     conn.close()
 
+
 def mark_seen_bulk(paths, db_path, current_run):
     conn = sqlite3.connect(db_path)
     cur = conn.cursor()
 
     cur.executemany(
         "UPDATE books SET last_seen = ? WHERE path = ?",
-        [(current_run, _normalize_path(p)) for p in paths],
+        [(current_run, str(p)) for p in paths],
     )
 
     conn.commit()
