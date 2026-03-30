@@ -1,91 +1,75 @@
-# Book Indexer — progress summary
+Book Indexer — Checkpoint: Incremental + Cleanup + Summary
+Архитектура
 
-Repo: learning-system  
-Branch: feature/book_indexer  
-Project: 02_projects/book_indexer  
+Слои строго разделены:
 
-## Current state
+scan → build → storage → CLI (orchestration)
+scan — находит файлы
+build — создаёт Book и определяет статус
+storage — SQLite (upsert, mark, cleanup)
+CLI — оркестрация + агрегация статистики
+Incremental поведение (инвариант)
+файл считается unchanged, если size + mtime не изменились
+такие файлы:
+не пересобираются
+не записываются повторно
+НО остаются в базе
+Cleanup (mark-and-sweep)
 
-## Book Indexer — Summary (checkpoint)
+Используется схема:
 
-### Архитектура
+current_run — id запуска
+last_seen — отметка последнего появления
 
-Проект построен по слоям:
+Flow:
 
-* scan → находит файлы
-* build → создаёт Book + решает skip (size + mtime)
-* storage → SQLite
+новые/изменённые → upsert + last_seen
+все найденные файлы → mark_seen_bulk
 
-Слои не смешиваются.
+cleanup:
 
----
+DELETE WHERE last_seen < current_run
+Критический фикс
 
-### Текущие возможности
+Исправлено:
 
-* сканирование директории
-* registry парсеров
-* модель Book
-* SQLite storage
-* CLI (book-index)
-* editable install
+skip-файлы теперь проходят через mark_seen_bulk
+устранён баг с несовпадением путей (нормализация)
+Logging / Summary
 
----
+Добавлена сводка выполнения:
 
-### Incremental поведение (инвариант)
++ added
+~ updated
+- removed
+= unchanged
 
-* файлы не перерабатываются, если size + mtime не изменились
-* при этом они ДОЛЖНЫ оставаться в базе
+Где:
 
----
-
-### Реализован cleanup (mark-and-sweep)
-
-Добавлено:
-
-* поле last_seen
-* run_id (current_run)
-
-Логика:
-
-1. каждый запуск генерирует current_run
-2. новые/изменённые файлы → upsert + last_seen
-3. ВСЕ файлы → mark_seen_bulk (обновление last_seen)
-4. cleanup:
-   DELETE WHERE last_seen < current_run
-
----
-
-### Критический фикс
-
-Исправлена ошибка:
-
-* раньше skip-файлы не обновляли last_seen
-* это приводило к их удалению
-
-Решение:
-
-* добавлен mark_seen_bulk(paths, ...)
-
----
-
-### Текущее состояние
+added — новые файлы
+updated — изменённые
+unchanged — пропущенные (skip)
+removed — удалённые через cleanup
+Распределение ответственности
+build_book(path, existing_meta)
+решает: added / updated / unchanged
+CLI:
+делает lookup (get_book_file_info)
+считает unchanged
+агрегирует статистику
+storage:
+не знает про skip
+возвращает:
+added / updated из save_index_sqlite
+removed из cleanup_missing_books
+Текущее состояние
 
 ✔ incremental работает
 ✔ cleanup безопасен
-✔ повторные запуски стабильны
-✔ удаление/добавление файлов корректно отражается
+✔ skip не ломает базу
+✔ summary отражает реальное состояние
+✔ архитектура сохранена
 
-Проект достиг уровня "production-safe core".
+Статус
 
----
-
-### Следующий шаг
-
-Добавить логирование изменений:
-
-* added
-* updated
-* removed
-* unchanged
-
-Без изменения архитектуры.
+production-safe core + observability
