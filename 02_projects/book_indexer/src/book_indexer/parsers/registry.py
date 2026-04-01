@@ -1,12 +1,14 @@
-from book_indexer.parsers.fb2_parser import parse_fb2
-from book_indexer.parsers.pdf_parser import parse_pdf
+from book_indexer.parsers.base import BaseParser
+from book_indexer.parsers.fb2_parser import FB2Parser
+from book_indexer.parsers.pdf_parser import PDFParser
 
 
 PARSERS = {
-    ".fb2": parse_fb2,
-    ".pdf": parse_pdf,
+    ".fb2": FB2Parser(),
+    ".fb2.zip": FB2Parser(),
+    ".pdf": PDFParser(),
 }
 
 
-def get_parser(ext: str):
+def get_parser(ext: str) -> BaseParser | None:
     return PARSERS.get(ext)

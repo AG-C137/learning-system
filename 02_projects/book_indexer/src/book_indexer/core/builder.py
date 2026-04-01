@@ -19,7 +19,10 @@ def build_book(path: Path, existing_meta=None):
     parser = get_parser(book.extension)
 
     if parser:
-        parser(book)
+        result = parser.parse(path)
+        if result.status != "failed":
+            book.title = result.title
+            book.author = result.author
 
     if existing_meta is None:
         return book, "added"

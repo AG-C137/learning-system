@@ -1,5 +1,7 @@
 from pathlib import Path
 
+from book_indexer.core.book import detect_book_extension
+
 
 BOOK_EXTENSIONS = {
     ".pdf",
@@ -9,6 +11,7 @@ BOOK_EXTENSIONS = {
     ".djvu",
     ".doc",
     ".docx",
+    ".fb2.zip"
 }
 
 
@@ -21,7 +24,7 @@ def scan_directory(path: str):
         if not file.is_file():
             continue
 
-        if file.suffix.lower() in BOOK_EXTENSIONS:
+        if detect_book_extension(file) in BOOK_EXTENSIONS:
             result.append(file)
 
     return result

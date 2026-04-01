@@ -1,6 +1,9 @@
-from book_indexer.core.book import Book
+from pathlib import Path
+
+from book_indexer.parsers.base import ParseResult
 
 
-def parse_pdf(book: Book):
-    # пока просто используем имя файла
-    book.title = book.name
+class PDFParser:
+    def parse(self, path: Path) -> ParseResult:
+        # пока просто используем имя файла
+        return ParseResult(title=path.stem, status="partial")

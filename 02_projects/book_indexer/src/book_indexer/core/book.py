@@ -1,11 +1,20 @@
 from pathlib import Path
 
 
+def detect_book_extension(path: Path) -> str:
+    name = path.name.lower()
+
+    if name.endswith(".fb2.zip"):
+        return ".fb2.zip"
+
+    return path.suffix.lower()
+
+
 class Book:
     def __init__(self, path: Path):
         self.path = path
         self.name = path.stem
-        self.extension = path.suffix.lower()
+        self.extension = detect_book_extension(path)
 
         self.title = None
         self.author = None
