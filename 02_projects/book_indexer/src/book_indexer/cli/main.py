@@ -50,9 +50,20 @@ def index(path: str):
 def search(text: str):
     rows = search_books(DB_PATH, text)
 
-    for r in rows:
-        print(r)
+    if not rows:
+        print("No results found")
+        return
 
+    rows = rows[:20]
+
+    for path, title, author in rows:
+        title = title or "[no title]"
+        author = author or "[no author]"
+        author = " ".join(author.split()) if author else author
+
+        print(f"{title} — {author}")
+        print(f"  {path}")
+        print()
 
 def main():
     print("cli started")

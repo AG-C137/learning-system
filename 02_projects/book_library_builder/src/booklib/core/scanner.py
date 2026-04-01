@@ -3,6 +3,7 @@ print("SCANNER LOADED")
 from pathlib import Path
 from dataclasses import dataclass
 from booklib.core.parser import parse_name
+from booklib.core.parsers import get_parser_for_path
 
 
 ALLOWED_EXT = {
@@ -60,7 +61,17 @@ def scan_folder(folder):
         else:
             continue
 
-        author, title = parse_name(name)
+        author = None
+        title = None
+
+        parser = get_parser_for_path(full)
+        if parser is not None:
+            result = parser.parse(full)
+            author = result.author
+            title = result.title
+
+        if not author and not title:
+            author, title = parse_name(name)
 
         books.append(
             {
