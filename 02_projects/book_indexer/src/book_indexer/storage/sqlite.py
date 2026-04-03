@@ -17,6 +17,8 @@ def _create_books_table(cur):
             ext TEXT,
             title TEXT,
             author TEXT,
+            description TEXT,
+            user_notes TEXT,
             source_dir TEXT,
             size INTEGER,
             mtime REAL,
@@ -26,26 +28,33 @@ def _create_books_table(cur):
     )
 
 
-def _ensure_last_seen_column(cur):
+def _ensure_books_columns(cur):
     cur.execute("PRAGMA table_info(books)")
     columns = {row[1] for row in cur.fetchall()}
 
     if "last_seen" not in columns:
         cur.execute("ALTER TABLE books ADD COLUMN last_seen REAL")
 
+    if "description" not in columns:
+        cur.execute("ALTER TABLE books ADD COLUMN description TEXT")
+
+    if "user_notes" not in columns:
+        cur.execute("ALTER TABLE books ADD COLUMN user_notes TEXT")
+
 
 def get_book_file_info(path, db_path):
     db_path = _normalize_path(db_path)
 
     conn = sqlite3.connect(db_path)
+    conn.row_factory = sqlite3.Row
     cur = conn.cursor()
 
     _create_books_table(cur)
-    _ensure_last_seen_column(cur)
+    _ensure_books_columns(cur)
 
     cur.execute(
         """
-        SELECT size, mtime
+        SELECT size, mtime, description, user_notes
         FROM books
         WHERE path = ?
         """,
@@ -55,7 +64,15 @@ def get_book_file_info(path, db_path):
     row = cur.fetchone()
 
     conn.close()
-    return row
+    if row is None:
+        return None
+
+    return {
+        "size": row["size"],
+        "mtime": row["mtime"],
+        "description": row["description"],
+        "user_notes": row["user_notes"],
+    }
 
 
 def save_index_sqlite(books, db_path, source_dir, current_run):
@@ -66,7 +83,7 @@ def save_index_sqlite(books, db_path, source_dir, current_run):
     cur = conn.cursor()
 
     _create_books_table(cur)
-    _ensure_last_seen_column(cur)
+    _ensure_books_columns(cur)
     stats = {"added": 0, "updated": 0}
 
     for b in books:
@@ -99,12 +116,14 @@ def save_index_sqlite(books, db_path, source_dir, current_run):
                 ext,
                 title,
                 author,
+                description,
+                user_notes,
                 source_dir,
                 size,
                 mtime,
                 last_seen
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 book_path,
@@ -112,6 +131,8 @@ def save_index_sqlite(books, db_path, source_dir, current_run):
                 b.extension,
                 b.title,
                 b.author,
+                b.description,
+                b.user_notes,
                 source_dir,
                 size,
                 mtime,
@@ -132,7 +153,7 @@ def cleanup_missing_books(db_path, source_dir, current_run):
     cur = conn.cursor()
 
     _create_books_table(cur)
-    _ensure_last_seen_column(cur)
+    _ensure_books_columns(cur)
 
     cur.execute(
         """
@@ -157,7 +178,7 @@ def init_db(db_path):
     cur = conn.cursor()
 
     _create_books_table(cur)
-    _ensure_last_seen_column(cur)
+    _ensure_books_columns(cur)
 
     conn.commit()
     conn.close()
@@ -166,6 +187,9 @@ def init_db(db_path):
 def mark_seen_bulk(paths, db_path, current_run):
     conn = sqlite3.connect(db_path)
     cur = conn.cursor()
+
+    _create_books_table(cur)
+    _ensure_books_columns(cur)
 
     cur.executemany(
         "UPDATE books SET last_seen = ? WHERE path = ?",

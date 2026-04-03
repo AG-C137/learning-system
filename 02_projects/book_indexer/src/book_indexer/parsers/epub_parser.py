@@ -1,8 +1,29 @@
+from html.parser import HTMLParser
 from pathlib import Path
+from posixpath import dirname
+from posixpath import join
+from posixpath import normpath
 import zipfile
 import xml.etree.ElementTree as ET
 
 from .base import ParseResult
+from .base import clean_book_text
+
+TEXT_LIMIT = 15_000
+
+
+class _HTMLTextExtractor(HTMLParser):
+    def __init__(self):
+        super().__init__()
+        self.parts: list[str] = []
+
+    def handle_data(self, data: str):
+        cleaned = " ".join(data.split())
+        if cleaned:
+            self.parts.append(cleaned)
+
+    def get_text(self) -> str:
+        return " ".join(self.parts)
 
 
 class EPUBParser:
@@ -26,6 +47,7 @@ class EPUBParser:
                 # OPF
                 opf_data = z.read(opf_path)
                 root = ET.fromstring(opf_data)
+                package_ns = self._package_namespace(root)
 
                 # metadata
                 title_el = root.find(
@@ -37,15 +59,80 @@ class EPUBParser:
 
                 title = title_el.text.strip() if title_el is not None and title_el.text else None
                 author = author_el.text.strip() if author_el is not None and author_el.text else None
+                text = self._extract_spine_text(z, root, opf_path, package_ns)
 
                 status = "ok" if title else "partial"
 
                 return ParseResult(
                     title=title,
                     author=author,
+                    text=text,
                     status=status,
                 )
 
         except Exception as e:
             print(f"epub parse error: {path} {e}")
-            return ParseResult(status="failed")
+            return ParseResult(status="failed", error=str(e))
+
+    def _package_namespace(self, root: ET.Element) -> str:
+        if root.tag.startswith("{"):
+            return root.tag.split("}", 1)[0] + "}"
+
+        return ""
+
+    def _extract_spine_text(
+        self,
+        archive: zipfile.ZipFile,
+        root: ET.Element,
+        opf_path: str,
+        package_ns: str,
+    ) -> str | None:
+        manifest = {}
+
+        for item in root.findall(f".//{package_ns}manifest/{package_ns}item"):
+            item_id = item.attrib.get("id")
+            href = item.attrib.get("href")
+            if item_id and href:
+                manifest[item_id] = href
+
+        base_dir = dirname(opf_path)
+        parts: list[str] = []
+        total = 0
+
+        for itemref in root.findall(f".//{package_ns}spine/{package_ns}itemref"):
+            item_id = itemref.attrib.get("idref")
+            href = manifest.get(item_id)
+
+            if not href:
+                continue
+
+            member_path = normpath(join(base_dir, href))
+
+            try:
+                html_data = archive.read(member_path)
+            except KeyError:
+                continue
+
+            text = self._strip_html(html_data)
+            if not text:
+                continue
+
+            remaining = TEXT_LIMIT - total
+            if remaining <= 0:
+                break
+
+            piece = text[:remaining]
+            parts.append(piece)
+            total += len(piece) + 1
+
+        result = " ".join(parts).strip()
+
+        result = clean_book_text(result)
+
+        return result or None
+
+    def _strip_html(self, html_data: bytes) -> str:
+        parser = _HTMLTextExtractor()
+        parser.feed(html_data.decode("utf-8", errors="ignore"))
+        parser.close()
+        return parser.get_text()

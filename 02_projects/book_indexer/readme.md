@@ -85,3 +85,15 @@ document_indexer
 knowledge_base_builder
 
 и подключить к OpenWebUI.
+
+## Development setup
+
+Activate venv and install in editable mode:
+
+```bash
+python -m venv .venv
+source .venv/bin/activate
+pip install -e .
+```
+
+Now `book-index` will always use the current source code.

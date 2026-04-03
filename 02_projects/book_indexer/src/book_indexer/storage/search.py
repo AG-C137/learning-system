@@ -16,7 +16,7 @@ def search_books(db_path: str, text: str):
 
     cur.execute(
         """
-        SELECT path, title, author
+        SELECT path, title, author, description
         FROM books
         WHERE
             LOWER(name) LIKE LOWER(?)
@@ -31,3 +31,13 @@ def search_books(db_path: str, text: str):
     conn.close()
 
     return rows
+
+
+def get_book_by_query(db_path: str, text: str):
+    rows = search_books(db_path, text)
+
+    if not rows:
+        return None
+
+    rows = sorted(rows, key=lambda row: ((row[1] or "").lower(), row[0]))
+    return rows[0]

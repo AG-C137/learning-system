@@ -1,75 +1,127 @@
-Book Indexer — Checkpoint: Incremental + Cleanup + Summary
-Архитектура
+📚 Проект: book_indexer — текущее состояние
+🎯 Цель
 
-Слои строго разделены:
+Локальный индексатор библиотеки:
 
-scan → build → storage → CLI (orchestration)
-scan — находит файлы
-build — создаёт Book и определяет статус
-storage — SQLite (upsert, mark, cleanup)
-CLI — оркестрация + агрегация статистики
-Incremental поведение (инвариант)
-файл считается unchanged, если size + mtime не изменились
-такие файлы:
-не пересобираются
-не записываются повторно
-НО остаются в базе
-Cleanup (mark-and-sweep)
+сканирует каталог книг
+извлекает метаданные
+хранит в SQLite
+поддерживает поиск
+готовится к AI-слою (описания / RAG)
+🏗️ Архитектура
+src/book_indexer/
+├── cli/          → CLI (index, search)
+├── scan/         → поиск файлов
+├── core/         → Book + builder (added/updated/unchanged)
+├── parsers/      → fb2 / fb2.zip / epub / pdf
+├── storage/      → SQLite + search
+⚙️ Что реализовано
+1. Сканирование
+рекурсивный обход каталога
+поддержка:
+.fb2, .fb2.zip, .epub, .pdf, .txt, и др.
+2. Инкрементальная индексация
+ключ: path
+сравнение: size + mtime
+статусы:
+added
+updated
+unchanged
+cleanup через last_seen
+3. Парсинг (ключевой этап — уже работает)
+FB2
+XML parsing
+исправлен namespace
+FB2.ZIP
+корректно определяется как отдельный тип
+парсится через FB2 parser
+EPUB
+реализован через:
+META-INF/container.xml
+извлечение OPF
+чтение:
+dc:title
+dc:creator
+полностью рабочий (проверен вручную)
+PDF
+пока заглушка (title = filename)
+4. Storage (SQLite)
 
-Используется схема:
+Таблица books:
 
-current_run — id запуска
-last_seen — отметка последнего появления
+path (PK)
+name
+ext
+title
+author
+size
+mtime
+source_dir
+last_seen
+5. Поиск
+простой LIKE по:
+title
+author
+name
+работает
+6. CLI (улучшен)
 
-Flow:
+Команды:
 
-новые/изменённые → upsert + last_seen
-все найденные файлы → mark_seen_bulk
+book-index index <path>
+book-index search <text>
 
-cleanup:
+Вывод поиска:
 
-DELETE WHERE last_seen < current_run
-Критический фикс
+1. Название — Автор
+   путь/к/файлу
+🧠 Важные инженерные решения
+введён ParseResult
 
-Исправлено:
+единый интерфейс парсеров:
 
-skip-файлы теперь проходят через mark_seen_bulk
-устранён баг с несовпадением путей (нормализация)
-Logging / Summary
+parse(path) -> ParseResult
+builder:
+не ломается при ошибке парсинга
+создаёт запись даже при failed
+⚠️ Ограничения
+нет:
+полнотекстового поиска
+описаний книг
+embeddings
+FTS
+EPUB/FB2 → только metadata, без текста
+нет parse_status в БД (только в runtime)
+📍 Текущая точка
 
-Добавлена сводка выполнения:
+Проект = рабочее ядро индексатора
 
-+ added
-~ updated
-- removed
-= unchanged
+Готов к следующему уровню:
 
-Где:
+👉 добавление AI-слоя
 
-added — новые файлы
-updated — изменённые
-unchanged — пропущенные (skip)
-removed — удалённые через cleanup
-Распределение ответственности
-build_book(path, existing_meta)
-решает: added / updated / unchanged
-CLI:
-делает lookup (get_book_file_info)
-считает unchanged
-агрегирует статистику
-storage:
-не знает про skip
-возвращает:
-added / updated из save_index_sqlite
-removed из cleanup_missing_books
-Текущее состояние
+🚀 Следующий этап
+🎯 Добавить описание книги (AI)
 
-✔ incremental работает
-✔ cleanup безопасен
-✔ skip не ломает базу
-✔ summary отражает реальное состояние
-✔ архитектура сохранена
+Что нужно сделать:
 
-Статус
+Расширить модель:
+description (summary)
 
-production-safe core + observability
+Добавить pipeline:
+
+parser → text extract → LLM → summary
+Реализовать:
+извлечение текста (хотя бы частично)
+генерацию описания
+сохранение в БД
+💡 Цель следующего чата
+
+Сделать:
+
+Книга → краткое описание (3–5 строк)
+
+и заложить основу под:
+
+RAG
+локальную базу знаний

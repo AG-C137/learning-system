@@ -15,6 +15,8 @@ def save_index(books: list[Book], path: str):
                 "ext": b.extension,
                 "title": b.title,
                 "author": b.author,
+                "description": b.description,
+                "user_notes": b.user_notes,
             }
         )
 

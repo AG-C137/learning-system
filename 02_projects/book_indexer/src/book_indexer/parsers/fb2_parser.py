@@ -4,6 +4,10 @@ import zipfile
 
 from book_indexer.parsers.base import ParseResult
 
+from .base import clean_book_text
+
+TEXT_LIMIT = 15_000
+
 
 class FB2Parser:
     def parse(self, path: Path) -> ParseResult:
@@ -25,8 +29,10 @@ class FB2Parser:
             if first is not None and last is not None:
                 author = f"{first.text} {last.text}"
 
+            text = self._extract_body_text(root, ns)
+
             status = "ok" if title else "partial"
-            return ParseResult(title=title, author=author, status=status)
+            return ParseResult(title=title, author=author, text=text, status=status)
         except Exception as e:
             print("fb2 parse error:", path, e)
             return ParseResult(status="failed", error=str(e))
@@ -61,3 +67,30 @@ class FB2Parser:
             return root.tag.split("}", 1)[0] + "}"
 
         return ""
+
+    def _extract_body_text(self, root: ET.Element, ns: str) -> str | None:
+        bodies = root.findall(f".//{ns}body")
+        parts: list[str] = []
+        total = 0
+
+        for body in bodies:
+            for chunk in body.itertext():
+                cleaned = " ".join(chunk.split())
+                if not cleaned:
+                    continue
+
+                remaining = TEXT_LIMIT - total
+                if remaining <= 0:
+                    break
+
+                piece = cleaned[:remaining]
+                parts.append(piece)
+                total += len(piece) + 1
+
+            if total >= TEXT_LIMIT:
+                break
+
+        text = " ".join(parts).strip()
+
+        text = clean_book_text(text)
+        return text or None
