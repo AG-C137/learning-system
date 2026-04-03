@@ -3,7 +3,6 @@ from pathlib import Path
 import zipfile
 
 from book_indexer.parsers.base import ParseResult
-
 from .base import clean_book_text
 
 TEXT_LIMIT = 15_000
@@ -14,25 +13,42 @@ class FB2Parser:
         try:
             tree = self._load_tree(path)
             root = tree.getroot()
+
+            if root is None:
+                return ParseResult(status="failed")
+
             ns = self._detect_namespace(root)
 
             title = None
             author = None
 
+            # --- title ---
             title_node = root.find(f".//{ns}book-title")
-            if title_node is not None:
-                title = title_node.text
+            if title_node is not None and title_node.text:
+                title = title_node.text.strip()
 
+            # --- author ---
             first = root.find(f".//{ns}author/{ns}first-name")
             last = root.find(f".//{ns}author/{ns}last-name")
 
-            if first is not None and last is not None:
-                author = f"{first.text} {last.text}"
+            first_text = first.text.strip() if first is not None and first.text else None
+            last_text = last.text.strip() if last is not None and last.text else None
 
+            if first_text and last_text:
+                author = f"{first_text} {last_text}"
+
+            # --- text ---
             text = self._extract_body_text(root, ns)
 
             status = "ok" if title else "partial"
-            return ParseResult(title=title, author=author, text=text, status=status)
+
+            return ParseResult(
+                title=title,
+                author=author,
+                text=text,
+                status=status,
+            )
+
         except Exception as e:
             print("fb2 parse error:", path, e)
             return ParseResult(status="failed", error=str(e))
@@ -59,17 +75,16 @@ class FB2Parser:
         for name in archive.namelist():
             if name.lower().endswith(".fb2"):
                 return name
-
         return None
 
     def _detect_namespace(self, root: ET.Element) -> str:
         if root.tag.startswith("{"):
             return root.tag.split("}", 1)[0] + "}"
-
         return ""
 
     def _extract_body_text(self, root: ET.Element, ns: str) -> str | None:
         bodies = root.findall(f".//{ns}body")
+
         parts: list[str] = []
         total = 0
 
@@ -92,5 +107,7 @@ class FB2Parser:
 
         text = " ".join(parts).strip()
 
+        # 🔹 очистка текста
         text = clean_book_text(text)
+
         return text or None
