@@ -1,5 +1,9 @@
+import json
 import sqlite3
 from pathlib import Path
+from urllib.error import URLError
+from urllib.request import Request
+from urllib.request import urlopen
 
 from book_indexer.core.book import Book
 
@@ -36,7 +40,8 @@ def _create_book_chunks_table(cur):
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             book_path TEXT,
             chunk_index INTEGER,
-            text TEXT
+            text TEXT,
+            embedding TEXT
         )
         """
     )
@@ -57,6 +62,43 @@ def _ensure_books_columns(cur):
 
     if "user_notes" not in columns:
         cur.execute("ALTER TABLE books ADD COLUMN user_notes TEXT")
+
+
+def _ensure_book_chunks_columns(cur):
+    cur.execute("PRAGMA table_info(book_chunks)")
+    columns = {row[1] for row in cur.fetchall()}
+
+    if "embedding" not in columns:
+        cur.execute("ALTER TABLE book_chunks ADD COLUMN embedding TEXT")
+
+
+def get_embedding(text: str) -> list[float] | None:
+    payload = json.dumps(
+        {
+            "model": "nomic-embed-text",
+            "prompt": text[:1000],
+        }
+    ).encode("utf-8")
+
+    request = Request(
+        "http://localhost:11434/api/embeddings",
+        data=payload,
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+
+    try:
+        with urlopen(request, timeout=30) as response:
+            body = response.read().decode("utf-8")
+    except (OSError, URLError, TimeoutError, ValueError):
+        return None
+
+    try:
+        data = json.loads(body)
+    except json.JSONDecodeError:
+        return None
+
+    return data.get("embedding")
 
 
 def get_book_file_info(path, db_path):
@@ -93,7 +135,7 @@ def get_book_file_info(path, db_path):
     }
 
 
-def save_index_sqlite(books, db_path, source_dir, current_run):
+def save_index_sqlite(books_with_status, db_path, source_dir, current_run):
     db_path = _normalize_path(db_path)
     source_dir = _normalize_path(source_dir)
 
@@ -103,9 +145,10 @@ def save_index_sqlite(books, db_path, source_dir, current_run):
     _create_books_table(cur)
     _create_book_chunks_table(cur)
     _ensure_books_columns(cur)
+    _ensure_book_chunks_columns(cur)
     stats = {"added": 0, "updated": 0}
 
-    for b in books:
+    for b, status in books_with_status:
         p = Path(b.path)
         st = p.stat()
 
@@ -161,15 +204,29 @@ def save_index_sqlite(books, db_path, source_dir, current_run):
             ),
         )
 
-        cur.execute(
-            "DELETE FROM book_chunks WHERE book_path = ?",
-            (book_path,),
-        )
-
-        for i, chunk in enumerate(getattr(b, "chunks", [])):
+        if status in ("added", "updated"):
             cur.execute(
-                "INSERT INTO book_chunks (book_path, chunk_index, text) VALUES (?, ?, ?)",
-                (book_path, i, chunk),
+                "DELETE FROM book_chunks WHERE book_path = ?",
+                (book_path,),
+            )
+
+            for i, chunk in enumerate(getattr(b, "chunks", [])):
+                cur.execute(
+                    "INSERT INTO book_chunks (book_path, chunk_index, text) VALUES (?, ?, ?)",
+                    (book_path, i, chunk),
+                )
+
+    cur.execute(
+        "SELECT id, text FROM book_chunks WHERE embedding IS NULL"
+    )
+    rows = cur.fetchall()
+
+    for row_id, text in rows:
+        embedding = get_embedding(text)
+        if embedding:
+            cur.execute(
+                "UPDATE book_chunks SET embedding = ? WHERE id = ?",
+                (json.dumps(embedding), row_id),
             )
 
     conn.commit()
@@ -187,6 +244,7 @@ def cleanup_missing_books(db_path, source_dir, current_run):
     _create_books_table(cur)
     _create_book_chunks_table(cur)
     _ensure_books_columns(cur)
+    _ensure_book_chunks_columns(cur)
 
     cur.execute(
         """
@@ -213,6 +271,7 @@ def init_db(db_path):
     _create_books_table(cur)
     _create_book_chunks_table(cur)
     _ensure_books_columns(cur)
+    _ensure_book_chunks_columns(cur)
 
     conn.commit()
     conn.close()
@@ -225,6 +284,7 @@ def mark_seen_bulk(paths, db_path, current_run):
     _create_books_table(cur)
     _create_book_chunks_table(cur)
     _ensure_books_columns(cur)
+    _ensure_book_chunks_columns(cur)
 
     cur.executemany(
         "UPDATE books SET last_seen = ? WHERE path = ?",

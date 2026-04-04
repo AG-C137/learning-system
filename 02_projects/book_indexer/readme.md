@@ -97,3 +97,7 @@ pip install -e .
 ```
 
 Now `book-index` will always use the current source code.
+
+
+SELECT COUNT(*) FROM books;
+SELECT COUNT(*) FROM book_chunks;
