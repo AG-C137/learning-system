@@ -19,6 +19,7 @@ class Book:
         self.title = None
         self.author = None
         self.description = None
+        self.raw_text = None
         self.user_notes = None
 
     def __str__(self):

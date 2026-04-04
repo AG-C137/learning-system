@@ -18,11 +18,25 @@ def _create_books_table(cur):
             title TEXT,
             author TEXT,
             description TEXT,
+            raw_text TEXT,
             user_notes TEXT,
             source_dir TEXT,
             size INTEGER,
             mtime REAL,
             last_seen REAL
+        )
+        """
+    )
+
+
+def _create_book_chunks_table(cur):
+    cur.execute(
+        """
+        CREATE TABLE IF NOT EXISTS book_chunks (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            book_path TEXT,
+            chunk_index INTEGER,
+            text TEXT
         )
         """
     )
@@ -37,6 +51,9 @@ def _ensure_books_columns(cur):
 
     if "description" not in columns:
         cur.execute("ALTER TABLE books ADD COLUMN description TEXT")
+
+    if "raw_text" not in columns:
+        cur.execute("ALTER TABLE books ADD COLUMN raw_text TEXT")
 
     if "user_notes" not in columns:
         cur.execute("ALTER TABLE books ADD COLUMN user_notes TEXT")
@@ -54,7 +71,7 @@ def get_book_file_info(path, db_path):
 
     cur.execute(
         """
-        SELECT size, mtime, description, user_notes
+        SELECT size, mtime, description, raw_text, user_notes
         FROM books
         WHERE path = ?
         """,
@@ -71,6 +88,7 @@ def get_book_file_info(path, db_path):
         "size": row["size"],
         "mtime": row["mtime"],
         "description": row["description"],
+        "raw_text": row["raw_text"] if "raw_text" in row.keys() else None,
         "user_notes": row["user_notes"],
     }
 
@@ -83,6 +101,7 @@ def save_index_sqlite(books, db_path, source_dir, current_run):
     cur = conn.cursor()
 
     _create_books_table(cur)
+    _create_book_chunks_table(cur)
     _ensure_books_columns(cur)
     stats = {"added": 0, "updated": 0}
 
@@ -117,13 +136,14 @@ def save_index_sqlite(books, db_path, source_dir, current_run):
                 title,
                 author,
                 description,
+                raw_text,
                 user_notes,
                 source_dir,
                 size,
                 mtime,
                 last_seen
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 book_path,
@@ -132,6 +152,7 @@ def save_index_sqlite(books, db_path, source_dir, current_run):
                 b.title,
                 b.author,
                 b.description,
+                b.raw_text,
                 b.user_notes,
                 source_dir,
                 size,
@@ -139,6 +160,17 @@ def save_index_sqlite(books, db_path, source_dir, current_run):
                 current_run,
             ),
         )
+
+        cur.execute(
+            "DELETE FROM book_chunks WHERE book_path = ?",
+            (book_path,),
+        )
+
+        for i, chunk in enumerate(getattr(b, "chunks", [])):
+            cur.execute(
+                "INSERT INTO book_chunks (book_path, chunk_index, text) VALUES (?, ?, ?)",
+                (book_path, i, chunk),
+            )
 
     conn.commit()
     conn.close()
@@ -153,6 +185,7 @@ def cleanup_missing_books(db_path, source_dir, current_run):
     cur = conn.cursor()
 
     _create_books_table(cur)
+    _create_book_chunks_table(cur)
     _ensure_books_columns(cur)
 
     cur.execute(
@@ -178,6 +211,7 @@ def init_db(db_path):
     cur = conn.cursor()
 
     _create_books_table(cur)
+    _create_book_chunks_table(cur)
     _ensure_books_columns(cur)
 
     conn.commit()
@@ -189,6 +223,7 @@ def mark_seen_bulk(paths, db_path, current_run):
     cur = conn.cursor()
 
     _create_books_table(cur)
+    _create_book_chunks_table(cur)
     _ensure_books_columns(cur)
 
     cur.executemany(

@@ -3,7 +3,6 @@ from pathlib import Path
 import zipfile
 
 from book_indexer.parsers.base import ParseResult
-from .base import clean_book_text
 
 TEXT_LIMIT = 15_000
 
@@ -106,8 +105,5 @@ class FB2Parser:
                 break
 
         text = " ".join(parts).strip()
-
-        # 🔹 очистка текста
-        text = clean_book_text(text)
 
         return text or None

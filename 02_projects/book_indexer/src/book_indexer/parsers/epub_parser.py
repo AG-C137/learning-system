@@ -7,7 +7,6 @@ import zipfile
 import xml.etree.ElementTree as ET
 
 from .base import ParseResult
-from .base import clean_book_text
 
 TEXT_LIMIT = 15_000
 
@@ -17,13 +16,18 @@ class _HTMLTextExtractor(HTMLParser):
         super().__init__()
         self.parts: list[str] = []
 
+    def handle_starttag(self, tag, attrs):
+        if tag in ("p", "div", "br", "li"):
+            self.parts.append("\n")
+
     def handle_data(self, data: str):
         cleaned = " ".join(data.split())
         if cleaned:
             self.parts.append(cleaned)
 
     def get_text(self) -> str:
-        return " ".join(self.parts)
+        text = "".join(self.parts)
+        return text.strip()
 
 
 class EPUBParser:
@@ -98,12 +102,26 @@ class EPUBParser:
         base_dir = dirname(opf_path)
         parts: list[str] = []
         total = 0
+        chunks = 0
 
         for itemref in root.findall(f".//{package_ns}spine/{package_ns}itemref"):
             item_id = itemref.attrib.get("idref")
             href = manifest.get(item_id)
 
             if not href:
+                continue
+            if any(
+                marker in href.lower()
+                for marker in (
+                    "toc",
+                    "nav",
+                    "contents",
+                    "cover",
+                    "titlepage",
+                    "copyright",
+                    "imprint",
+                )
+            ):
                 continue
 
             member_path = normpath(join(base_dir, href))
@@ -114,7 +132,17 @@ class EPUBParser:
                 continue
 
             text = self._strip_html(html_data)
-            if not text:
+            if not text or len(text) < 200:
+                continue
+
+            words = text.split()
+            if len(words) < 50:
+                continue
+
+            lower_text = text.lower()
+            if lower_text.count("\n") > 20 and any(
+                x in lower_text for x in ["глава", "chapter", "contents"]
+            ):
                 continue
 
             remaining = TEXT_LIMIT - total
@@ -124,10 +152,15 @@ class EPUBParser:
             piece = text[:remaining]
             parts.append(piece)
             total += len(piece) + 1
+            chunks += 1
+
+            if chunks >= 5:
+                break
+
+            if total >= TEXT_LIMIT and chunks >= 1:
+                break
 
         result = " ".join(parts).strip()
-
-        result = clean_book_text(result)
 
         return result or None
 

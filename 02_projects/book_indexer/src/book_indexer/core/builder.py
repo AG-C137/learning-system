@@ -5,6 +5,37 @@ from book_indexer.core.book import Book
 from book_indexer.parsers.registry import get_parser
 
 
+def split_into_chunks(text: str, chunk_size: int = 800, overlap: int = 150) -> list[str]:
+    import re
+
+    sentences = re.split(r"(?<=[.!?])\s+", text)
+
+    chunks = []
+    current = []
+    current_len = 0
+
+    for sentence in sentences:
+        sentence = sentence.strip()
+        if not sentence:
+            continue
+
+        if current_len + len(sentence) > chunk_size and current:
+            chunk = " ".join(current)
+            chunks.append(chunk)
+
+            overlap_sentences = current[-2:] if len(current) >= 2 else current
+            current = overlap_sentences.copy()
+            current_len = sum(len(s) for s in current)
+
+        current.append(sentence)
+        current_len += len(sentence) + 1
+
+    if current:
+        chunks.append(" ".join(current))
+
+    return chunks
+
+
 def build_book(path: Path, existing_meta=None):
     st = path.stat()
     size = st.st_size
@@ -18,7 +49,7 @@ def build_book(path: Path, existing_meta=None):
             old_size == size
             and old_mtime == mtime
             and (
-                existing_meta["description"]
+                (existing_meta.get("description") and existing_meta.get("raw_text"))
                 or get_parser(book.extension) is None
                 or book.extension == ".pdf"
             )
@@ -27,6 +58,7 @@ def build_book(path: Path, existing_meta=None):
 
     if existing_meta is not None:
         book.description = existing_meta["description"]
+        book.raw_text = existing_meta.get("raw_text")
         book.user_notes = existing_meta["user_notes"]
 
     parser = get_parser(book.extension)
@@ -40,6 +72,12 @@ def build_book(path: Path, existing_meta=None):
         if result is not None and result.status != "failed":
             book.title = result.title
             book.author = result.author
+
+            if result.text:
+                book.raw_text = result.text
+                book.chunks = split_into_chunks(book.raw_text)
+            else:
+                book.chunks = []
 
             if not book.description and result.text:
                 book.description = generate_description(result.text)
