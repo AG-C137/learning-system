@@ -8,7 +8,7 @@ import xml.etree.ElementTree as ET
 
 from .base import ParseResult
 
-TEXT_LIMIT = 15_000
+TEXT_LIMIT = 50_000
 
 
 class _HTMLTextExtractor(HTMLParser):
@@ -154,7 +154,7 @@ class EPUBParser:
             total += len(piece) + 1
             chunks += 1
 
-            if chunks >= 5:
+            if chunks >= 15:
                 break
 
             if total >= TEXT_LIMIT and chunks >= 1:

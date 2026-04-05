@@ -2,5 +2,10 @@
 name = "book-indexer"
 version = "0.1.0"
 
+dependencies = [
+    "pypdf"
+]
+
 [project.scripts]
 book-index = "book_indexer.cli.main:main"
+

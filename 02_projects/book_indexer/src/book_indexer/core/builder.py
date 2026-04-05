@@ -1,4 +1,5 @@
 from pathlib import Path
+import re
 
 from book_indexer.ai.describer import generate_description
 from book_indexer.core.book import Book
@@ -6,8 +7,6 @@ from book_indexer.parsers.registry import get_parser
 
 
 def split_into_chunks(text: str, chunk_size: int = 800, overlap: int = 150) -> list[str]:
-    import re
-
     sentences = re.split(r"(?<=[.!?])\s+", text)
 
     chunks = []
@@ -34,6 +33,12 @@ def split_into_chunks(text: str, chunk_size: int = 800, overlap: int = 150) -> l
         chunks.append(" ".join(current))
 
     return chunks
+
+
+def normalize_text(text: str) -> str:
+    text = text.replace("\n", " ")
+    text = re.sub(r"\s+", " ", text)
+    return text.strip()
 
 
 def build_book(path: Path, existing_meta=None):
@@ -74,9 +79,10 @@ def build_book(path: Path, existing_meta=None):
             book.author = result.author
 
             if result.text:
-                book.raw_text = result.text
+                book.raw_text = normalize_text(result.text)
                 book.chunks = split_into_chunks(book.raw_text)
             else:
+                book.raw_text = None
                 book.chunks = []
 
             if not book.description and result.text:

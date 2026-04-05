@@ -1,5 +1,6 @@
 import json
 import math
+import re
 import sqlite3
 import sys
 import time
@@ -20,7 +21,15 @@ from book_indexer.storage.sqlite import save_index_sqlite
 from book_indexer.storage.search import search_books
 
 DB_PATH = "index.db"
+SCORE_THRESHOLD = 0.82
 STOPWORDS = {"что", "такое", "это", "как", "когда", "почему", "где"}
+DEFINITION_PATTERNS = [
+    "— это",
+    " это ",
+    "это ",
+    "является",
+    "представляет собой",
+]
 
 
 def cosine_similarity(a, b):
@@ -69,6 +78,26 @@ def normalize_query(query: str) -> str:
             q = q[len(prefix):].strip()
 
     return q
+
+
+def looks_like_definition(text: str) -> bool:
+    if not text:
+        return False
+
+    t = text[:300].lower()
+
+    patterns = [
+        r"^[^\.]{0,80}\s—\sэто\s",
+        r"^[^\.]{0,80}\sэто\s",
+        r"^[^\.]{0,80}\sявляется\s",
+        r"^[^\.]{0,80}\sпредставляет собой\s",
+    ]
+
+    for pattern in patterns:
+        if re.search(pattern, t):
+            return True
+
+    return False
 
 
 def index(path: str):
@@ -151,12 +180,17 @@ def show(text: str):
 
 
 def _get_semantic_top(text: str):
+    def is_definition(chunk_text: str) -> bool:
+        t = chunk_text.lower()
+        return any(pattern in t for pattern in DEFINITION_PATTERNS)
+
     query_norm = normalize_query(text)
     query_emb = get_embedding(query_norm)
     if not query_emb:
         return []
 
     query_lower = text.lower()
+    title_query = query_norm.lower()
 
     init_db(DB_PATH)
     conn = sqlite3.connect(DB_PATH)
@@ -220,13 +254,44 @@ def _get_semantic_top(text: str):
 
         score += min(boost, 0.15)
 
-        results.append((score, path, chunk_text))
+        if title_query and title_query in path.lower():
+            score += 0.2
+
+        results.append(
+            {
+                "score": score,
+                "book_path": path,
+                "text": chunk_text,
+            }
+        )
 
     if not results:
         return []
 
-    results.sort(reverse=True)
-    return results[:10]
+    results.sort(key=lambda item: item["score"], reverse=True)
+
+    definition_results = [r for r in results if is_definition(r["text"])]
+    if len(definition_results) >= 3:
+        results = definition_results
+
+    seen_books = set()
+    unique_results = []
+
+    for item in results:
+        book_path = item["book_path"]
+
+        if book_path in seen_books:
+            continue
+
+        seen_books.add(book_path)
+        unique_results.append(item)
+
+    results = unique_results
+
+    return [
+        (item["score"], item["book_path"], item["text"])
+        for item in results[:10]
+    ]
 
 
 def semantic_search(text: str):
@@ -240,24 +305,7 @@ def semantic_search(text: str):
         print((chunk_text or "")[:300])
 
 
-def ask_llm(question: str, context: str) -> str:
-    prompt = f"""
-Ответь на вопрос, используя только контекст ниже.
-Ответь на вопрос кратко и по существу.
-Если в контексте есть определение — используй его.
-
-Не придумывай информацию.
-Если ответа нет — скажи, что не найдено.
-
-Контекст:
-{context}
-
-Вопрос:
-{question}
-
-Ответ:
-"""
-
+def _generate_with_llm(prompt: str) -> str:
     data = json.dumps(
         {
             "model": "mistral",
@@ -282,20 +330,129 @@ def ask_llm(question: str, context: str) -> str:
     return result.get("response", "")
 
 
+def ask_llm(question: str, context: str | None = None) -> str:
+    if context is None:
+        prompt = f"""
+Ответь на вопрос кратко и по существу.
+Если ты не уверен, так и скажи.
+
+Вопрос:
+{question}
+
+Ответ:
+"""
+        return _generate_with_llm(prompt)
+
+    prompt = f"""
+Ответь на вопрос, используя только контекст ниже.
+Ответь на вопрос кратко и по существу.
+Если в контексте есть определение — используй его.
+
+Не придумывай информацию.
+Если ответа нет — скажи, что не найдено.
+
+Контекст:
+{context}
+
+Вопрос:
+{question}
+
+Ответ:
+"""
+
+    return _generate_with_llm(prompt)
+
+
+def rerank_chunks(question: str, chunks: list[dict]) -> list[int]:
+    if not chunks:
+        return []
+
+    prompt_parts = []
+
+    for i, chunk in enumerate(chunks, 1):
+        text = (chunk.get("text") or "")[:500]
+        prompt_parts.append(f"[{i}]\n{text}")
+
+    prompt = f"""
+Вопрос:
+{question}
+
+Ниже фрагменты текста. Выбери номера фрагментов, которые прямо помогают ответить на вопрос.
+
+Игнорируй художественные тексты, общие рассуждения и нерелевантные куски.
+
+Ответ верни ТОЛЬКО в формате:
+[1, 3, 5]
+
+Если ничего не подходит — верни [].
+
+Фрагменты:
+
+{'\n\n'.join(prompt_parts)}
+"""
+
+    response = _generate_with_llm(prompt)
+    numbers = re.findall(r"\d+", response)
+
+    indices = []
+    for number in numbers:
+        index = int(number) - 1
+        if 0 <= index < len(chunks) and index not in indices:
+            indices.append(index)
+
+    return indices
+
+
 def semantic_search_and_answer(text: str):
     top = _get_semantic_top(text)
     if not top:
-        print("No results found")
+        print("\n=== ANSWER ===\n")
+        print("Не найдено в базе. Генерирую общий ответ...\n")
+        print(ask_llm(text))
         return
 
-    context = "\n\n".join(chunk_text for _, _, chunk_text in top)
+    chunks = [
+        {"score": score, "book_path": path, "text": chunk_text}
+        for score, path, chunk_text in top
+    ]
+    max_score = 0.0
+
+    if chunks:
+        max_score = max(chunk["score"] for chunk in chunks)
+
+    indices = rerank_chunks(text, chunks)
+
+    if indices:
+        context_chunks = [chunks[i] for i in indices[:3]]
+    else:
+        context_chunks = chunks[:3]
+
+    has_definition = any(
+        looks_like_definition(chunk["text"])
+        for chunk in context_chunks
+    )
+
+    print(f"[debug] max_score={max_score:.3f}")
+    print(f"[debug] has_definition={has_definition}")
+
+    if (
+        not context_chunks
+        or max_score < SCORE_THRESHOLD
+        or not has_definition
+    ):
+        print("\n=== ANSWER ===\n")
+        print("Нет надёжной информации в базе. Генерирую общий ответ...\n")
+        print(ask_llm(text))
+        return
+
+    context = "\n\n".join(chunk["text"] for chunk in context_chunks)
     answer = ask_llm(text, context)
 
     print("\n=== ANSWER ===\n")
     print(answer)
     print("\n=== SOURCES ===\n")
-    for score, path, _ in top:
-        print(f"{path} [{score:.3f}]")
+    for chunk in context_chunks:
+        print(f"{chunk['book_path']} [{chunk['score']:.3f}]")
 
 
 def main():

@@ -1,760 +1,560 @@
-Сделай техническое саммари проекта **book_indexer**.
+Сделай техническое саммари проекта book_indexer.
+
+🎯 Цель
+
+Кратко и точно описать текущую архитектуру и реализованный функционал, чтобы другой разработчик мог быстро понять систему.
+
+📁 Ограничения
+Пиши только по фактическому коду
+Не выдумывай функциональность
+Не делай предположений
+Без воды
+Объём: 200–400 строк
+📌 Структура
+1. Общая цель
+
+Что система делает сейчас (фактически)
+
+2. Pipeline
+
+Опиши:
+
+scan_directory
+build_book
+parsers (fb2 / epub / pdf)
+raw_text
+chunking
+embeddings
+storage (SQLite)
+3. EPUB (подробно)
+_extract_spine_text
+фильтры:
+href
+длина
+слова
+ограничения:
+TEXT_LIMIT
+chunks limit
+4. Модель данных
+Book
+таблица books
+таблица book_chunks
+5. Retrieval
+как считается similarity
+keyword boost
+фильтры чанков
+top-N
+6. RAG (ask2)
+pipeline
+normalize_query
+context сборка
+prompt
+7. Quality control (ВАЖНО)
+
+Опиши:
+
+threshold (max_score)
+definition detection (looks_like_definition)
+fallback логика
+8. CLI
+index
+search
+show
+ask2
+9. Ограничения
+
+Только фактические:
+
+PDF
+отсутствие vector index
+отсутствие grouping по книге
+отсутствие entity matching
+загрузка всех embeddings в память
+и т.д.
+
+Если что-то не видно в коде — пропусти.
+
+
+1. Общая Цель
+
+book_indexer сейчас индексирует книги из каталога в SQLite.
+Система сканирует файловую директорию, пытается извлечь метаданные и текст, сохраняет книги и чанки, считает embeddings, даёт обычный поиск и RAG-поиск через CLI.
+Поддержанный по коду парсинг есть для fb2, fb2.zip, epub, pdf.
+Обычный поиск работает по name/title/author.
+Семантический поиск работает по таблице book_chunks и embeddings.
+ask2 строит ответ через локальную LLM с контекстом из найденных чанков либо уходит в fallback без контекста.
+2. Pipeline
+
+Входная точка CLI находится в main.py.
+Команда index вызывает init_db(DB_PATH).
+Затем вызывается scan_directory(path).
+scan_directory рекурсивно обходит каталог через Path(path).rglob("*").
+В индекс попадают только файлы, у которых detect_book_extension(file) входит в BOOK_EXTENSIONS.
+BOOK_EXTENSIONS включает: .pdf, .fb2, .epub, .txt, .djvu, .doc, .docx, .fb2.zip.
+После сканирования для каждого файла вызывается get_book_file_info(f, DB_PATH).
+Затем вызывается build_book(f, existing_meta).
+build_book создаёт объект Book(path).
+В Book сразу заполняются path, name, extension.
+В build_book читаются size и mtime файла.
+Если есть старая запись, система сравнивает старые size/mtime с текущими.
+При совпадении size/mtime книга считается unchanged, если выполнено одно из условий:
+Есть и description, и raw_text.
+Либо для расширения нет парсера.
+Либо расширение равно .pdf.
+Для unchanged возвращается (None, "unchanged").
+Если запись уже была, в объект Book подставляются старые description, raw_text, user_notes.
+Парсер берётся через get_parser(book.extension).
+Если парсер существует, вызывается parser.parse(path).
+Если ParseResult.status != "failed", в Book записываются title, author.
+Если result.text есть, текст нормализуется через normalize_text.
+Затем нормализованный текст кладётся в book.raw_text.
+Затем book.raw_text режется на чанки через split_into_chunks.
+Если текста нет, book.raw_text = None, book.chunks = [].
+Если description ещё нет и result.text существует, вызывается generate_description(result.text).
+Далее save_index_sqlite пишет книги и чанки в SQLite.
+Для книг со статусом added или updated старые чанки удаляются.
+Потом вставляются новые строки в book_chunks.
+После этого для всех чанков без embedding вызывается get_embedding(text).
+Embedding сохраняется в book_chunks.embedding как JSON-строка.
+После сохранения вызывается mark_seen_bulk(paths, DB_PATH, current_run).
+Затем вызывается cleanup_missing_books(DB_PATH, path, current_run).
+3. Parsers
 
-🎯 Цель: кратко и точно описать текущую архитектуру и реализованный функционал, чтобы другой разработчик мог быстро понять систему.
+Базовый контракт описан в base.py.
+ParseResult содержит title, author, text, status, error.
+status может быть только "ok", "partial", "failed".
+Реестр парсеров находится в registry.py.
+В реестре есть:
+.fb2 -> FB2Parser()
+.fb2.zip -> FB2Parser()
+.epub -> EPUBParser()
+.pdf -> PDFParser()
+Для .txt, .djvu, .doc, .docx парсеры в реестре отсутствуют.
+Функция clean_book_text в base.py существует, но в текущем pipeline не используется.
+4. EPUB Подробно
 
----
+EPUB-парсер находится в epub_parser.py.
 
-## 📁 Ограничения
+Константа TEXT_LIMIT = 50_000.
 
-* Пиши только по фактическому коду
-* Не выдумывай функциональность
-* Не делай предположений
-* Без воды и общих фраз
-* Объём: 200–400 строк максимум
+parse() открывает EPUB как zipfile.ZipFile.
 
----
+Сначала читается META-INF/container.xml.
 
-## 📌 Структура саммари
+Из container.xml извлекается rootfile.
 
-### 1. Общая цель проекта
+Из rootfile.attrib["full-path"] берётся путь к OPF.
 
-* что делает система сейчас (фактически)
+Затем читается OPF-файл.
 
-### 2. Поток данных (pipeline)
+title читается из dc:title.
 
-Опиши шаги:
+author читается из dc:creator.
 
-* сканирование
-* парсинг (по форматам: fb2 / epub / pdf)
-* извлечение текста
-* построение метаданных
-* сохранение
+Основной текст собирается через _extract_spine_text(...).
 
----
+_extract_spine_text сначала строит manifest.
 
-### 3. EPUB парсинг (ВАЖНО)
+В manifest кладётся соответствие item_id -> href.
 
-Отдельно подробно:
+Затем берётся base_dir = dirname(opf_path).
 
-* где находится код
-* как работает `_extract_spine_text`
-* какие фильтры применяются:
+Дальше парсер проходит по элементам spine/itemref.
 
-  * по href
-  * по длине текста
-  * по словам
-* как ограничивается объём (chunks / TEXT_LIMIT)
+Для каждого itemref берётся idref, по нему ищется href.
 
----
+Если href отсутствует, элемент пропускается.
 
-### 4. Структура данных книги
+Есть фильтр по имени href.
 
-Опиши модель книги:
+Пропускаются элементы, если в href.lower() есть один из маркеров:
 
-* какие поля есть
-* что сохраняется в индекс
+"toc"
 
----
+"nav"
 
-### 5. Хранилище
+"contents"
 
-* где хранится индекс (JSON / SQLite)
-* как происходит обновление (added / updated / unchanged)
+"cover"
 
----
+"titlepage"
 
-### 6. CLI
+"copyright"
 
-* основные команды:
+"imprint"
 
-  * index
-  * search
-  * show
-  * ask2
+Путь внутри архива строится через normpath(join(base_dir, href)).
 
----
+Если такого файла в архиве нет, KeyError перехватывается, элемент пропускается.
 
-### 7. Ограничения текущей реализации
+HTML очищается через _strip_html.
 
-* чего нет (например: raw_text, embeddings, semantic search)
+_strip_html использует кастомный _HTMLTextExtractor, основанный на HTMLParser.
 
----
+При тегах p, div, br, li в буфер добавляется перевод строки.
 
-## 📎 Формат
+Текстовые узлы очищаются через " ".join(data.split()).
 
-* Markdown
-* Чёткие заголовки
-* Минимум текста, максимум конкретики
-* Можно вставлять короткие фрагменты кода (по делу)
+После HTML-очистки идёт фильтрация текста.
 
----
+Если текста нет или len(text) < 200, кусок пропускается.
 
-Если какая-то часть не очевидна — пропусти её, не додумывай.
+Потом считается words = text.split().
 
+Если слов меньше 50, кусок пропускается.
 
-Ответ:
+Затем вычисляется lower_text = text.lower().
 
-# 1. Общая цель проекта
+Если в тексте больше 20 переводов строки и одновременно встречается одно из слов "глава", "chapter", "contents", кусок пропускается.
 
-`book_indexer` индексирует локальную библиотеку книг, извлекает из файлов базовые метаданные и текст, сохраняет их в SQLite и даёт несколько режимов поиска через CLI:
+Дальше применяется общий лимит по длине.
 
-- обычный поиск по `name / title / author`
-- semantic search по embeddings чанков текста
-- RAG-ответ на вопрос по найденным чанкам
-
-Поддерживаемые парсеры по факту кода:
-
-- `fb2`
-- `fb2.zip`
-- `epub`
-- `pdf`
-
----
-
-# 2. Поток данных (pipeline)
-
-## 2.1 Сканирование
-
-Файл: [filesystem.py](/home/ag137/Programs/learning-system/02_projects/book_indexer/src/book_indexer/scan/filesystem.py)
-
-`scan_directory(path)`:
-
-- рекурсивно обходит каталог через `Path(path).rglob("*")`
-- берёт только файлы
-- определяет расширение через `detect_book_extension()`
-- фильтрует по `BOOK_EXTENSIONS`
-
-Поддерживаемые расширения на уровне сканера:
-
-```python
-BOOK_EXTENSIONS = {
-    ".pdf", ".fb2", ".epub", ".txt", ".djvu", ".doc", ".docx", ".fb2.zip"
-}
-```
+remaining = TEXT_LIMIT - total.
 
-Но реальные парсеры есть только для:
+Если remaining <= 0, цикл прерывается.
 
-- `.fb2`
-- `.fb2.zip`
-- `.epub`
-- `.pdf`
-
-## 2.2 Построение книги
-
-Файл: [builder.py](/home/ag137/Programs/learning-system/02_projects/book_indexer/src/book_indexer/core/builder.py)
+В parts добавляется только text[:remaining].
 
-`build_book(path, existing_meta=None)`:
-
-1. читает `size` и `mtime`
-2. создаёт `Book(path)`
-3. если запись уже есть:
-   - сравнивает `size` и `mtime`
-   - считает книгу `unchanged`, если:
-     - файл не менялся
-     - и уже есть одновременно `description` и `raw_text`
-     - или парсер отсутствует
-     - или расширение `.pdf`
-4. если книга уже была в БД:
-   - подставляет `description`
-   - подставляет `raw_text`
-   - подставляет `user_notes`
-5. выбирает парсер через `get_parser(extension)`
-6. вызывает `parser.parse(path)`
-7. если парсинг успешен:
-   - заполняет `title`
-   - заполняет `author`
-   - сохраняет `result.text` в `book.raw_text`
-   - режет `raw_text` на `book.chunks`
-   - если `description` ещё нет, вызывает `generate_description(result.text)`
-8. возвращает:
-   - `(None, "unchanged")`
-   - `(book, "added")`
-   - `(book, "updated")`
+total увеличивается на len(piece) + 1.
 
-## 2.3 Парсинг по форматам
+chunks увеличивается на 1.
 
-Регистрация парсеров: [registry.py](/home/ag137/Programs/learning-system/02_projects/book_indexer/src/book_indexer/parsers/registry.py)
+Есть ограничение if chunks >= 15: break.
 
-```python
-PARSERS = {
-    ".fb2": FB2Parser(),
-    ".fb2.zip": FB2Parser(),
-    ".epub": EPUBParser(),
-    ".pdf": PDFParser(),
-}
-```
+Есть дополнительная остановка if total >= TEXT_LIMIT and chunks >= 1: break.
 
-### FB2
+Результат собирается как " ".join(parts).strip().
 
-Файл: [fb2_parser.py](/home/ag137/Programs/learning-system/02_projects/book_indexer/src/book_indexer/parsers/fb2_parser.py)
+Если после всех фильтров текста нет, возвращается None.
 
-- читает XML через `ElementTree`
-- для `.fb2.zip` сначала открывает ZIP и ищет первый `.fb2`
-- извлекает:
-  - `book-title`
-  - `author/first-name`
-  - `author/last-name`
-- текст получает из всех `body` через `itertext()`
-- ограничивает текст `TEXT_LIMIT = 15_000`
+5. FB2 Подробно
 
-### EPUB
+FB2-парсер находится в fb2_parser.py.
+Константа TEXT_LIMIT = 50_000.
+Поддерживаются как .fb2, так и .fb2.zip.
+Для .fb2.zip файл открывается как ZIP-архив.
+В архиве ищется первый файл с расширением .fb2.
+XML загружается через ElementTree.
+Namespace определяется по корневому тегу.
+Название читается из book-title.
+Автор собирается из first-name и last-name.
+Текст берётся из всех body.
+По каждому body вызывается body.itertext().
+Каждый текстовый фрагмент очищается через " ".join(chunk.split()).
+Пустые фрагменты пропускаются.
+Дальше работает только лимит длины TEXT_LIMIT.
+Фрагменты добавляются последовательно до исчерпания лимита.
+Результат собирается как " ".join(parts).strip().
+Если текста нет, возвращается None.
+6. PDF Подробно
 
-Файл: [epub_parser.py](/home/ag137/Programs/learning-system/02_projects/book_indexer/src/book_indexer/parsers/epub_parser.py)
+PDF-парсер находится в pdf_parser.py.
+Используется pypdf.PdfReader.
+Константа TEXT_LIMIT = 15000.
+Парсер обрабатывает только первые 10 страниц: reader.pages[:10].
+Для каждой страницы вызывается page.extract_text().
+Если текста нет, страница пропускается.
+Текст страницы дополнительно strip()-ится.
+Если длина текста страницы меньше 50, страница пропускается.
+Все страницы склеиваются через "\n".join(parts).strip().
+Если общий текст длиннее лимита, он обрезается до TEXT_LIMIT.
+Возвращается ParseResult(title=path.stem, author=None, text=full_text|None, status="ok"|"partial").
+При исключении возвращается status="failed" и error=str(e).
+7. Raw Text И Chunking
 
-- открывает EPUB как ZIP
-- читает `META-INF/container.xml`
-- находит `rootfile full-path`
-- читает OPF
-- извлекает:
-  - `dc:title`
-  - `dc:creator`
-- текст получает через `_extract_spine_text()`
+raw_text хранится как нормализованный полный текст книги.
+Нормализация делается в normalize_text(text).
+В ней все \n заменяются на пробел.
+Затем все последовательности пробельных символов схлопываются через re.sub(r"\s+", " ", text).
+Результат обрезается strip().
+Чанкинг делается в split_into_chunks(text, chunk_size=800, overlap=150).
+Текст режется по предложениям через re.split(r"(?<=[.!?])\s+", text).
+Пустые предложения пропускаются.
+Чанк растёт, пока суммарная длина не превысит chunk_size.
+При переполнении текущий чанк добавляется в chunks.
+Затем новый чанк начинаетcя с overlap на уровне предложений.
+Реально overlap берётся как последние 2 предложения предыдущего чанка.
+Параметр overlap=150 в коде есть, но в логике не используется напрямую.
+В конце оставшийся чанк тоже добавляется.
+Чанки сохраняются в Book.chunks.
+В Book атрибут chunks заранее не объявлен в конструкторе, он появляется динамически в builder.
+8. Описание Книги
 
-### PDF
+Генерация описания находится в describer.py.
+Используется локальный Ollama endpoint http://localhost:11434/api/generate.
+Модель: "mistral".
+Перед вызовом текст книги схлопывается в одну строку.
+Если после очистки текста меньше 200 символов, описание не создаётся.
+Для prompt используется только первые 5000 символов.
+Prompt просит краткое описание книги в 3–5 предложений.
+Из ответа ещё раз удаляются лишние пробелы.
+Описание сохраняется в books.description.
+9. Модель Данных
 
-Файл: [pdf_parser.py](/home/ag137/Programs/learning-system/02_projects/book_indexer/src/book_indexer/parsers/pdf_parser.py)
+Класс Book находится в book.py.
 
-Текущая реализация:
+Поля объекта:
 
-```python
-return ParseResult(title=path.stem, text=None, status="partial")
-```
+path
 
-То есть:
+name
 
-- текст PDF не извлекается
-- автор не извлекается
-- title берётся из имени файла
+extension
 
-## 2.4 Извлечение текста
+title
 
-Структура результата парсинга: [base.py](/home/ag137/Programs/learning-system/02_projects/book_indexer/src/book_indexer/parsers/base.py)
+author
 
-```python
-@dataclass
-class ParseResult:
-    title: Optional[str]
-    author: Optional[str]
-    text: Optional[str]
-    status: Literal["ok", "partial", "failed"]
-    error: Optional[str]
-```
+description
 
-Сейчас `result.text` используется как исходный текст для:
+raw_text
 
-- `raw_text`
-- chunking
-- генерации `description`
+user_notes
 
-## 2.5 Построение описания
+Таблица books создаётся в SQLite со столбцами:
 
-Файл: [describer.py](/home/ag137/Programs/learning-system/02_projects/book_indexer/src/book_indexer/ai/describer.py)
+path TEXT PRIMARY KEY
 
-`generate_description(text)`:
+name TEXT
 
-- нормализует пробелы
-- не работает для текста короче 200 символов
-- обрезает вход до 5000 символов
-- шлёт POST на `http://localhost:11434/api/generate`
-- использует модель `mistral`
-- возвращает `response` из JSON
+ext TEXT
 
-## 2.6 Сохранение
+title TEXT
 
-Файл: [sqlite.py](/home/ag137/Programs/learning-system/02_projects/book_indexer/src/book_indexer/storage/sqlite.py)
+author TEXT
 
-Во время `index`:
+description TEXT
 
-1. `init_db(DB_PATH)`
-2. `save_index_sqlite(books_with_status, DB_PATH, path, current_run)`
-3. `mark_seen_bulk(paths, DB_PATH, current_run)`
-4. `cleanup_missing_books(DB_PATH, path, current_run)`
+raw_text TEXT
 
----
+user_notes TEXT
 
-# 3. EPUB парсинг
+source_dir TEXT
 
-Файл: [epub_parser.py](/home/ag137/Programs/learning-system/02_projects/book_indexer/src/book_indexer/parsers/epub_parser.py)
+size INTEGER
 
-## 3.1 Где находится код
+mtime REAL
 
-Основные элементы:
+last_seen REAL
 
-- `_HTMLTextExtractor`
-- `EPUBParser.parse(...)`
-- `EPUBParser._extract_spine_text(...)`
+Таблица book_chunks создаётся со столбцами:
 
-## 3.2 Как работает `_HTMLTextExtractor`
+id INTEGER PRIMARY KEY AUTOINCREMENT
 
-`_HTMLTextExtractor` наследуется от `HTMLParser`.
+book_path TEXT
 
-Что делает:
+chunk_index INTEGER
 
-- `handle_starttag()` вставляет `"\n"` для тегов:
-  - `p`
-  - `div`
-  - `br`
-  - `li`
-- `handle_data()`:
-  - схлопывает пробелы внутри текстового узла
-  - добавляет очищенный фрагмент в `parts`
-- `get_text()`:
-  - делает `"".join(self.parts)`
-  - возвращает `strip()`
+text TEXT
 
-То есть EPUB-текст сохраняет часть структуры по строкам.
+embedding TEXT
 
-## 3.3 Как работает `_extract_spine_text`
+embedding хранится как JSON-строка, а не как отдельный vector-тип.
 
-Сигнатура:
+В sqlite.py есть миграционный код через PRAGMA table_info(...).
 
-```python
-def _extract_spine_text(self, archive, root, opf_path, package_ns) -> str | None:
-```
+При необходимости автоматически добавляются колонки:
 
-Алгоритм:
+last_seen
 
-1. строит `manifest` как `id -> href`
-2. вычисляет `base_dir = dirname(opf_path)`
-3. инициализирует:
-   - `parts = []`
-   - `total = 0`
-   - `chunks = 0`
-4. проходит по `spine/itemref`
-5. для каждого элемента:
-   - получает `idref`
-   - находит `href` в `manifest`
-   - фильтрует служебные `href`
-   - читает HTML-файл из ZIP
-   - превращает HTML в текст через `_strip_html()`
-   - применяет текстовые фильтры
-   - обрезает по оставшемуся лимиту
-   - добавляет в `parts`
-   - увеличивает `total` и `chunks`
-   - прерывает цикл по лимитам
-6. объединяет `parts` через пробел
-7. возвращает строку или `None`
+description
 
-## 3.4 Фильтры по `href`
+raw_text
 
-Файл пропускается, если `href.lower()` содержит:
+user_notes
 
-- `"toc"`
-- `"nav"`
-- `"contents"`
-- `"cover"`
-- `"titlepage"`
-- `"copyright"`
-- `"imprint"`
+embedding
 
-Код:
+10. Storage / SQLite
 
-```python
-if any(
-    marker in href.lower()
-    for marker in (
-        "toc", "nav", "contents", "cover",
-        "titlepage", "copyright", "imprint",
-    )
-):
-    continue
-```
+init_db(db_path) создаёт таблицы и докидывает недостающие колонки.
+get_book_file_info(path, db_path) возвращает старые size, mtime, description, raw_text, user_notes.
+save_index_sqlite(books_with_status, db_path, source_dir, current_run) выполняет основную запись.
+Пути db_path и source_dir нормализуются через Path(...).resolve().
+Для каждой книги сначала проверяется наличие записи по path.
+На основе этого считаются счётчики added и updated.
+Запись в books выполняется через INSERT OR REPLACE.
+Для книг со статусом added или updated старые чанки удаляются из book_chunks.
+Затем вставляются новые чанки с их chunk_index.
+После вставки выбираются все чанки, у которых embedding IS NULL.
+Для каждого такого чанка вызывается get_embedding(text).
+Embedding-сервис использует Ollama endpoint http://localhost:11434/api/embeddings.
+Модель: "nomic-embed-text".
+В embedding prompt передаётся только text[:1000].
+Если embedding успешно получен, он сериализуется через json.dumps(...).
+cleanup_missing_books(db_path, source_dir, current_run) удаляет книги, которые не были отмечены в текущем запуске.
+Условие удаления: source_dir = ? AND (last_seen IS NULL OR last_seen < current_run).
+mark_seen_bulk(paths, db_path, current_run) обновляет last_seen для уже существующих записей.
+Код удаления чанков осиротевших книг отдельно не реализован.
+В cleanup_missing_books удаляются только строки из books.
+11. Обычный Поиск
 
-## 3.5 Фильтры по тексту
+SQL-поиск находится в search.py.
+Для SQLite регистрируется функция LOWER, использующая casefold().
+Это даёт Unicode-insensitive поиск по строкам.
+Поиск идёт через LIKE по полям:
+name
+title
+author
+Запрос строится как %{text}%.
+search() в CLI сортирует результаты по (title or "").lower().
+На вывод берутся первые 20 записей.
+show() показывает первый найденный результат и печатает:
+title
+author
+description
+path
+12. Retrieval
 
-После `_strip_html()`:
-
-```python
-if not text or len(text) < 200:
-    continue
-```
-
-Дальше:
-
-```python
-words = text.split()
-if len(words) < 50:
-    continue
-```
-
-И ещё один фильтр:
-
-```python
-lower_text = text.lower()
-if lower_text.count("\n") > 20 and any(
-    x in lower_text for x in ["глава", "chapter", "contents"]
-):
-    continue
-```
-
-Итого часть spine отбрасывается, если:
-
-- текст пустой
-- текст короче 200 символов
-- слов меньше 50
-- текст выглядит как оглавление / navigation по эвристике
-
-## 3.6 Ограничение объёма
-
-Константа:
-
-```python
-TEXT_LIMIT = 15_000
-```
-
-Счётчики:
-
-- `chunks` — число принятых частей
-- `total` — суммарная длина
-
-После добавления части:
-
-```python
-piece = text[:remaining]
-parts.append(piece)
-total += len(piece) + 1
-chunks += 1
-```
-
-Остановка:
-
-```python
-if chunks >= 5:
-    break
-
-if total >= TEXT_LIMIT and chunks >= 1:
-    break
-```
-
-Фактически EPUB берёт только начало книги:
-
-- максимум 5 содержательных частей spine
-- максимум 15_000 символов
-
----
-
-# 4. Структура данных книги
-
-Файл: [book.py](/home/ag137/Programs/learning-system/02_projects/book_indexer/src/book_indexer/core/book.py)
-
-Класс `Book` содержит:
-
-- `path`
-- `name`
-- `extension`
-- `title`
-- `author`
-- `description`
-- `raw_text`
-- `user_notes`
-
-`chunks` не объявлен в `Book.__init__`, но создаётся динамически в `build_book()`.
-
-## Что сохраняется в индекс
-
-Таблица `books` хранит:
-
-- `path`
-- `name`
-- `ext`
-- `title`
-- `author`
-- `description`
-- `raw_text`
-- `user_notes`
-- `source_dir`
-- `size`
-- `mtime`
-- `last_seen`
-
-Таблица `book_chunks` хранит:
-
-- `id`
-- `book_path`
-- `chunk_index`
-- `text`
-- `embedding`
-
----
-
-# 5. Хранилище
-
-## 5.1 SQLite
-
-Основное хранилище: SQLite, файл `index.db`.
-
-Файл: [sqlite.py](/home/ag137/Programs/learning-system/02_projects/book_indexer/src/book_indexer/storage/sqlite.py)
-
-### Таблица `books`
-
-```sql
-CREATE TABLE IF NOT EXISTS books (
-    path TEXT PRIMARY KEY,
-    name TEXT,
-    ext TEXT,
-    title TEXT,
-    author TEXT,
-    description TEXT,
-    raw_text TEXT,
-    user_notes TEXT,
-    source_dir TEXT,
-    size INTEGER,
-    mtime REAL,
-    last_seen REAL
-)
-```
-
-### Таблица `book_chunks`
-
-```sql
-CREATE TABLE IF NOT EXISTS book_chunks (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    book_path TEXT,
-    chunk_index INTEGER,
-    text TEXT,
-    embedding TEXT
-)
-```
-
-## 5.2 Миграции
-
-SQLite-слой делает безопасные миграции через `PRAGMA table_info(...)`.
-
-Для `books` дозаполняются колонки:
-
-- `last_seen`
-- `description`
-- `raw_text`
-- `user_notes`
-
-Для `book_chunks`:
-
-- `embedding`
-
-## 5.3 Обновление индекса
-
-`build_book()` возвращает:
-
-- `"added"`
-- `"updated"`
-- `"unchanged"`
-
-### `unchanged`
-
-Файл считается `unchanged`, если:
-
-- размер совпадает
-- `mtime` совпадает
-- и:
-  - есть и `description`, и `raw_text`
-  - или парсер отсутствует
-  - или это `.pdf`
-
-### `added` / `updated`
-
-Если книга не `unchanged`, она попадает в `save_index_sqlite(...)`.
-
-## 5.4 Сохранение книг
-
-`save_index_sqlite(books_with_status, ...)`:
-
-- принимает список пар `(book, status)`
-- делает `INSERT OR REPLACE` в `books`
-- считает статистику `added / updated`
-
-## 5.5 Сохранение чанков
-
-Для книг со статусом `added` или `updated`:
-
-1. удаляются старые чанки:
-
-```sql
-DELETE FROM book_chunks WHERE book_path = ?
-```
-
-2. вставляются новые чанки из `book.chunks`
-
-Для `unchanged` чанки не пересоздаются.
-
-## 5.6 Embeddings
-
-В `sqlite.py` есть `get_embedding(text)`:
-
-- вызывает `http://localhost:11434/api/embeddings`
-- использует модель `nomic-embed-text`
-- режет текст до 1000 символов
-- возвращает вектор или `None`
-
-После сохранения книг выполняется дозаполнение:
-
-```sql
-SELECT id, text FROM book_chunks WHERE embedding IS NULL
-```
-
-Для всех чанков без embedding:
-
-- считается embedding
-- сохраняется как JSON-строка в `book_chunks.embedding`
-
-Существующие embeddings не пересчитываются.
-
-## 5.7 JSON-хранилище
-
-В проекте есть [index.py](/home/ag137/Programs/learning-system/02_projects/book_indexer/src/book_indexer/storage/index.py) с `save_index(...)`, который сохраняет книги в JSON.
-
-По текущему CLI он не используется.
-
----
-
-# 6. CLI
-
-Файл: [main.py](/home/ag137/Programs/learning-system/02_projects/book_indexer/src/book_indexer/cli/main.py)
-
-## 6.1 `index`
-
-```bash
-book-index index <path>
-```
-
-Что делает:
-
-- инициализирует БД
-- сканирует каталог
-- строит книги через `build_book`
-- сохраняет книги в SQLite
-- обновляет `last_seen`
-- удаляет пропавшие книги
-- печатает статистику:
-
-```text
-+<added> added
-~<updated> updated
--<removed> removed
-=<unchanged> unchanged
-```
-
-## 6.2 `search`
-
-```bash
-book-index search <query>
-```
-
-Использует [search.py](/home/ag137/Programs/learning-system/02_projects/book_indexer/src/book_indexer/storage/search.py).
-
-SQL:
-
-```sql
-SELECT path, title, author, description
-FROM books
-WHERE
-    LOWER(name) LIKE LOWER(?)
-    OR LOWER(title) LIKE LOWER(?)
-    OR LOWER(author) LIKE LOWER(?)
-```
-
-Особенности:
-
-- Unicode-insensitive `LOWER` через `casefold()`
-- сортировка по `title.lower()`
-- вывод максимум 20 результатов
-
-## 6.3 `show`
-
-```bash
-book-index show <query>
-```
-
-- использует `search(..., display=False)`
-- берёт первый результат
-- печатает:
-  - `title`
-  - `author`
-  - `description`
-  - `path`
-
-## 6.4 `ask2`
-
-```bash
-book-index ask2 "<вопрос>"
-```
-
-Текущая реализация использует простой RAG-поток.
-
-### Retrieval
-
-Helper `_get_semantic_top(text)`:
-
-1. нормализует запрос через `normalize_query()`:
-   - убирает префиксы:
-     - `что такое`
-     - `что это`
-     - `кто такой`
-     - `что значит`
-2. считает embedding запроса
-3. читает из БД:
-
-```sql
+Семантический retrieval реализован в _get_semantic_top(text) в main.py.
+Перед embedding запрос нормализуется через normalize_query(query).
+normalize_query удаляет префиксы:
+"что такое"
+"что это"
+"кто такой"
+"что значит"
+Embedding запроса считается той же моделью "nomic-embed-text".
+Из SQLite выбираются все строки:
 SELECT book_path, text, embedding FROM book_chunks WHERE embedding IS NOT NULL
-```
+Все такие строки загружаются в память через fetchall().
+На каждый чанк накладывается текстовый фильтр:
+Если текста нет, чанк пропускается.
+Если len(chunk_text) < 300, чанк пропускается.
+Embedding чанка парсится из JSON.
+Базовая метрика сходства: cosine_similarity(a, b).
+cosine_similarity считается вручную в Python.
+После cosine score применяется эвристический boost по "объясняющим" маркерам в тексте чанка.
+Если есть "— это", добавляется 0.08.
+Иначе если есть " это ", добавляется 0.05.
+Если есть "является", добавляется 0.05.
+Если есть "представляет собой", добавляется 0.05.
+Затем применяется keyword boost.
+Запрос для keyword boost берётся из исходного text.lower(), а не из normalize_query.
+Стоп-слова: "что", "такое", "это", "как", "когда", "почему", "где".
+Слова короче 5 символов игнорируются.
+Для каждого слова берётся root = word[:8].
+Если root есть в тексте чанка, добавляется 0.03.
+Если полное word есть в тексте чанка, добавляется 0.05.
+Общий keyword boost ограничен сверху 0.15.
+Есть path-based title boost.
+Если нормализованный запрос целиком входит в book_path.lower(), добавляется 0.2.
+После этого результаты сортируются по score по убыванию.
+Затем применяется фильтр definition-like chunks.
+Используется внутренняя функция is_definition(chunk_text), основанная на DEFINITION_PATTERNS.
+Если definition-like результатов хотя бы 3, остаются только они.
+Затем идёт дедупликация по book_path.
+На одну книгу остаётся только один лучший chunk.
+На выходе возвращаются максимум 10 элементов.
+Формат возврата: список кортежей (score, book_path, text).
+13. RAG / ask2
 
-4. фильтрует чанки:
-   - пропускает `chunk_text` короче 300 символов
-5. для каждого чанка:
-   - считает cosine similarity
-   - добавляет небольшие эвристические бонусы за объяснительные конструкции:
-     - `"— это"`
-     - `" это "`
-     - `"является"`
-     - `"представляет собой"`
-   - добавляет keyword boost:
-     - с `STOPWORDS`
-     - по `root = word[:8]`
-     - бонус capped через `min(boost, 0.15)`
-6. сортирует результаты по score
-7. возвращает top-10 чанков
+Команда ask2 вызывает semantic_search_and_answer(text).
+Сначала вызывается _get_semantic_top(text).
+Если результатов нет, включается fallback без контекста.
+Иначе кортежи переводятся в список словарей:
+{"score": score, "book_path": path, "text": chunk_text}
+Затем считается max_score = max(chunk["score"] for chunk in chunks).
+Потом вызывается rerank_chunks(question, chunks).
+rerank_chunks делает один LLM-вызов через _generate_with_llm(prompt).
+Для rerank в prompt включаются до 500 символов каждого чанка.
+Чанки нумеруются как [1], [2], ...
+Prompt просит выбрать номера фрагментов, которые прямо помогают ответить на вопрос.
+Ответ должен быть в формате списка, например [1, 3, 5].
+Из ответа regex-ом вытаскиваются все числа.
+Индексы переводятся в zero-based.
+Дубликаты убираются.
+Если rerank вернул индексы, берутся первые 3 выбранных чанка.
+Иначе берутся первые 3 чанка из retrieval.
+Контекст строится как "\n\n".join(chunk["text"] for chunk in context_chunks).
+Финальный ответ генерируется через ask_llm(question, context).
+ask_llm использует отдельный prompt для режима с контекстом.
+Этот prompt требует:
+отвечать только по контексту
+отвечать кратко и по существу
+использовать определение, если оно есть
+не придумывать информацию
+говорить, что ответа нет, если в контексте его нет
+После ответа CLI печатает блок === ANSWER ===.
+Затем печатает === SOURCES ===.
+В sources выводятся только реально использованные context_chunks, а не весь top-10.
+14. Quality Control
 
-### Генерация ответа
+В main.py задан SCORE_THRESHOLD = 0.82.
+В semantic_search_and_answer печатается [debug] max_score=....
+После выбора context_chunks считается has_definition.
+has_definition использует looks_like_definition(chunk["text"]).
+looks_like_definition работает без LLM, только на regex.
+Если текста нет, функция сразу возвращает False.
+Проверяется только начало текста: text[:300].lower().
+Паттерны привязаны к началу строки.
+Используются шаблоны:
+^[^\.]{0,80}\s—\sэто\s
+^[^\.]{0,80}\sэто\s
+^[^\.]{0,80}\sявляется\s
+^[^\.]{0,80}\sпредставляет собой\s
+В semantic_search_and_answer печатается [debug] has_definition=....
+Fallback включается, если выполняется хотя бы одно условие:
+not context_chunks
+max_score < SCORE_THRESHOLD
+not has_definition
+В fallback-режиме контекст не смешивается с общим ответом.
+В этом режиме печатается сообщение:
+Нет надёжной информации в базе. Генерирую общий ответ...
+Затем вызывается ask_llm(question) без контекста.
+Для режима без контекста ask_llm использует отдельный prompt:
+ответить кратко
+если не уверен, так и сказать
+15. CLI
 
-`ask_llm(question, context)`:
+CLI-команды определены в main().
+При старте печатается cli started.
+Если аргументов нет, выводится список команд.
+Реально поддерживаются команды:
+index
+search
+show
+ask
+ask2
+index <path> запускает полный pipeline индексации.
+search <query> делает SQL-поиск по книгам.
+show <query> показывает первую найденную книгу.
+ask <query> делает только семантический поиск и печатает top results.
+ask2 <query> делает retrieval + rerank + answer generation + fallback.
+16. Ограничения По Фактическому Коду
 
-- отправляет prompt в `http://localhost:11434/api/generate`
-- использует модель `mistral`
-- просит:
-  - отвечать только по контексту
-  - кратко
-  - не выдумывать
-  - если ответа нет, сказать об этом
-
-`semantic_search_and_answer(text)`:
-
-- берёт top chunks из `_get_semantic_top`
-- объединяет их в `context`
-- печатает:
-
-```text
-=== ANSWER ===
-```
-
-- затем выводит ответ модели
-
----
-
-# 7. Ограничения текущей реализации
-
-Только по фактическому коду.
-
-- Нет реального извлечения текста из PDF: [pdf_parser.py](/home/ag137/Programs/learning-system/02_projects/book_indexer/src/book_indexer/parsers/pdf_parser.py) возвращает только `title=path.stem`.
-- Нет парсеров для `.txt`, `.djvu`, `.doc`, `.docx`, хотя эти расширения сканируются.
-- Нет полнотекстового SQL-поиска по `raw_text` или `book_chunks.text`; обычный `search` ищет только по `name`, `title`, `author`.
-- Нет отдельного векторного индекса; semantic search перебирает все строки `book_chunks` из SQLite в Python.
-- Нет ограничения по размеру выборки при semantic search на уровне SQL; все чанки с embedding загружаются целиком.
-- Нет цитирования источников или ссылок на конкретные chunks в ответе `ask2`; печатается только итоговый ответ модели.
-- `_get_semantic_top()` сейчас не группирует результаты по книге; в top-10 могут попасть несколько чанков из одной книги.
-- `Book.chunks` не объявлен в модели `Book`, а добавляется динамически в `build_book()`.
-- `cleanup_missing_books()` удаляет записи из `books`, но код не удаляет связанные строки из `book_chunks`.
-- В CLI остаются отладочные выводы:
-  - `print(book_indexer.__file__)`
-  - `print("cli started")`
-- Ошибки сетевых вызовов к Ollama в `describer`, embeddings и `ask_llm` тихо гасятся возвратом `None` / `""`; детальной диагностики нет.
-- Нет отдельной схемы для связей chunk -> title/author; для semantic search в чанках хранится только `book_path`, `chunk_index`, `text`, `embedding`.
-- Нет тестов, миграционного фреймворка и настройки конфигурации путей/моделей в просмотренном коде.
+Векторного индекса нет.
+ANN / FAISS / HNSW / sqlite-vector не используются.
+Retrieval делает полный SELECT всех embeddings из book_chunks.
+Similarity считается в Python, а не в базе.
+Все embeddings-кандидаты загружаются в память целиком.
+Фильтрации по книге, автору, серии, типу документа до retrieval нет.
+Entity matching нет.
+Нормализации морфологии нет.
+Лемматизации нет.
+Стемминга нет.
+Специального ранжирования по названию книги нет, кроме substring-boost по book_path.
+Retrieval не читает books.title, только book_path, text, embedding.
+Definition-detection в retrieval и looks_like_definition в quality guard используют разные эвристики.
+Для ask2 используется один rerank LLM-вызов и один final-answer LLM-вызов.
+Для fallback используется только один общий LLM-вызов без контекста.
+PDF-парсинг ограничен первыми 10 страницами.
+PDF-текст обрезается до 15000 символов.
+OCR нет.
+Извлечение таблиц, изображений, layout-структуры нет.
+Для .txt, .djvu, .doc, .docx файлы сканируются, но парсеров в registry нет.
+Это значит, что такие файлы могут попасть в scan, но не будут реально распарсены.
+cleanup_missing_books удаляет записи из books, но по этому коду не удаляет связанные строки из book_chunks.
+В book_chunks нет внешнего ключа на books.
+Embedding-сервис и LLM-сервис жёстко завязаны на локальный Ollama по localhost:11434.
+Конфигурации моделей через настройки или env в коде нет.
+pypdf используется в коде PDF-парсера, но зависимость в pyproject.toml по этому срезу кода не описана.
+В split_into_chunks аргумент overlap=150 не участвует в формуле overlap.
+Book не описан как dataclass и не имеет фиксированной схемы для chunks.
+В CLI остаётся диагностический print(book_indexer.__file__) при импорте main.py.
+Для SQLite-поиска по description поиска нет.
+Для RAG нет кэширования результатов retrieval или rerank.
+Нет пакетной отправки embeddings в модель.
+Нет транзакционного разделения на отдельный этап “build” и отдельный этап “embed”; embedding считается внутри save_index_sqlite.
+Нет проверки качества ответа LLM после генерации.
+Нет цитирования ответов по предложениям или по span-ам.
+Источники в ask2 показывают только путь и score, без excerpt-а.

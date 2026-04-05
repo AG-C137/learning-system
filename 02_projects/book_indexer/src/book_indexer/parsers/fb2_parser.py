@@ -4,7 +4,7 @@ import zipfile
 
 from book_indexer.parsers.base import ParseResult
 
-TEXT_LIMIT = 15_000
+TEXT_LIMIT = 50_000
 
 
 class FB2Parser:
