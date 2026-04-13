@@ -9,6 +9,7 @@ __pycache__/
 
 # VS Code
 .vscode/
+.idea/
 
 # OS files
 .DS_Store
@@ -20,3 +21,10 @@ __pycache__/
 
 # Book library builder data
 02_projects/book_library_builder/data/
+
+
+# Calibre library (очень важно)
+calibre_lib/
+*.epub
+*.pdf
+*.fb2
