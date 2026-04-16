@@ -277,6 +277,28 @@ def init_db(db_path):
     conn.close()
 
 
+def load_book_metadata(db_path):
+    db_path = _normalize_path(db_path)
+
+    conn = sqlite3.connect(db_path)
+    cur = conn.cursor()
+
+    _create_books_table(cur)
+    _ensure_books_columns(cur)
+
+    cur.execute(
+        "SELECT path, title, author FROM books"
+    )
+    rows = cur.fetchall()
+    conn.close()
+
+    return {
+        row[0]: {"title": row[1], "author": row[2]}
+        for row in rows
+        if row[0] is not None
+    }
+
+
 def mark_seen_bulk(paths, db_path, current_run):
     conn = sqlite3.connect(db_path)
     cur = conn.cursor()

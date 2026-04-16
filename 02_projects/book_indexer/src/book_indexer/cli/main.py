@@ -16,6 +16,7 @@ from book_indexer.core.builder import build_book
 from book_indexer.storage.sqlite import cleanup_missing_books
 from book_indexer.storage.sqlite import get_book_file_info
 from book_indexer.storage.sqlite import init_db
+from book_indexer.storage.sqlite import load_book_metadata
 from book_indexer.storage.sqlite import mark_seen_bulk
 from book_indexer.storage.sqlite import save_index_sqlite
 from book_indexer.storage.search import search_books
@@ -172,15 +173,7 @@ def show(text: str):
     print(f"Path: {path}")
 
 
-def _get_semantic_top(text: str):
-    query_norm = normalize_query(text)
-    query_emb = get_embedding(query_norm)
-    if not query_emb:
-        return []
-
-    query_lower = text.lower()
-    title_query = query_norm.lower()
-
+def load_chunks():
     init_db(DB_PATH)
     conn = sqlite3.connect(DB_PATH)
     cur = conn.cursor()
@@ -194,7 +187,8 @@ def _get_semantic_top(text: str):
     if not rows:
         return []
 
-    results = []
+    books_map = load_book_metadata(DB_PATH)
+    chunks = []
 
     for path, chunk_text, emb_json in rows:
         if not chunk_text or len(chunk_text) < 300:
@@ -205,6 +199,37 @@ def _get_semantic_top(text: str):
         except (TypeError, json.JSONDecodeError):
             continue
 
+        chunk = {
+            "source": path,
+            "book_path": path,
+            "text": chunk_text,
+            "embedding": emb,
+        }
+
+        meta = books_map.get(path)
+        if meta:
+            chunk["title"] = meta.get("title")
+            chunk["author"] = meta.get("author")
+
+        chunks.append(chunk)
+
+    return chunks
+
+
+def semantic_rank(chunks: list[dict], text: str) -> list[dict]:
+    query_norm = normalize_query(text)
+    query_emb = get_embedding(query_norm)
+    if not query_emb:
+        return []
+
+    query_lower = text.lower()
+    title_query = query_norm.lower()
+    results = []
+
+    for chunk in chunks:
+        path = chunk["book_path"]
+        chunk_text = chunk["text"]
+        emb = chunk["embedding"]
         score = cosine_similarity(query_emb, emb)
         text_lower = chunk_text.lower()
 
@@ -249,6 +274,7 @@ def _get_semantic_top(text: str):
         results.append(
             {
                 "score": score,
+                "source": path,
                 "book_path": path,
                 "text": chunk_text,
             }
@@ -273,9 +299,16 @@ def _get_semantic_top(text: str):
 
     results = unique_results
 
+    return results
+
+
+def _get_semantic_top(text: str):
+    all_chunks = load_chunks()
+    ranked_chunks = semantic_rank(all_chunks, text)
+
     return [
         (item["score"], item["book_path"], item["text"])
-        for item in results[:10]
+        for item in ranked_chunks[:10]
     ]
 
 
@@ -387,18 +420,46 @@ def rerank_chunks(question: str, chunks: list[dict]) -> list[int]:
     return indices
 
 
-def semantic_search_and_answer(text: str):
-    top = _get_semantic_top(text)
-    if not top:
+def semantic_search_and_answer(text: str, book: str | None = None, author: str | None = None):
+    if book:
+        print(f"[mode] book={book}")
+    elif author:
+        print(f"[mode] author={author}")
+    else:
+        print("[mode] all")
+
+    all_chunks = load_chunks()
+
+    if book:
+        book_lower = book.lower()
+        all_chunks = [
+            chunk
+            for chunk in all_chunks
+            if book_lower in (chunk.get("title") or "").lower()
+        ]
+
+    if author:
+        author_lower = author.lower()
+        all_chunks = [
+            chunk
+            for chunk in all_chunks
+            if author_lower in (chunk.get("author") or "").lower()
+        ]
+
+    if not all_chunks:
+        print("\n=== ANSWER ===\n")
+        print("в базе нет информации")
+        return
+
+    chunks = semantic_rank(all_chunks, text)
+    chunks = chunks[:10]
+
+    if not chunks:
         print("\n=== ANSWER ===\n")
         print("Не найдено в базе. Генерирую общий ответ...\n")
         print(ask_llm(text))
         return
 
-    chunks = [
-        {"score": score, "book_path": path, "text": chunk_text}
-        for score, path, chunk_text in top
-    ]
     chunks.sort(key=lambda chunk: chunk["score"], reverse=True)
     max_score = chunks[0]["score"] if chunks else 0.0
 
@@ -436,11 +497,41 @@ def semantic_search_and_answer(text: str):
         print(f"{chunk['book_path']} [{chunk['score']:.3f}]")
 
 
+def _parse_ask2_args(args: list[str]) -> tuple[str | None, str | None, str | None]:
+    book = None
+    author = None
+    query_parts = []
+    i = 0
+
+    while i < len(args):
+        arg = args[i]
+
+        if arg == "--book":
+            if i + 1 >= len(args):
+                return None, None, None
+            book = args[i + 1]
+            i += 2
+            continue
+
+        if arg == "--author":
+            if i + 1 >= len(args):
+                return None, None, None
+            author = args[i + 1]
+            i += 2
+            continue
+
+        query_parts.append(arg)
+        i += 1
+
+    query = " ".join(query_parts).strip()
+    return query or None, book, author
+
+
 def main():
     print("cli started")
 
     if len(sys.argv) < 2:
-        print("commands: index | search | show | ask | ask2")
+        print("commands: index | search | show | ask | ask2 [--book NAME] [--author NAME] <query>")
         return
 
     cmd = sys.argv[1]
@@ -466,11 +557,12 @@ def main():
 
         semantic_search(" ".join(sys.argv[2:]))
     elif cmd == "ask2":
-        if len(sys.argv) < 3:
+        query, book, author = _parse_ask2_args(sys.argv[2:])
+        if not query:
             print("need query")
             return
 
-        semantic_search_and_answer(" ".join(sys.argv[2:]))
+        semantic_search_and_answer(query, book=book, author=author)
 
 
 if __name__ == "__main__":
