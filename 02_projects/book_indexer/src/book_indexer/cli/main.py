@@ -21,15 +21,8 @@ from book_indexer.storage.sqlite import save_index_sqlite
 from book_indexer.storage.search import search_books
 
 DB_PATH = "index.db"
-SCORE_THRESHOLD = 0.82
+MAX_CONTEXT_CHUNKS = 4
 STOPWORDS = {"что", "такое", "это", "как", "когда", "почему", "где"}
-DEFINITION_PATTERNS = [
-    "— это",
-    " это ",
-    "это ",
-    "является",
-    "представляет собой",
-]
 
 
 def cosine_similarity(a, b):
@@ -180,10 +173,6 @@ def show(text: str):
 
 
 def _get_semantic_top(text: str):
-    def is_definition(chunk_text: str) -> bool:
-        t = chunk_text.lower()
-        return any(pattern in t for pattern in DEFINITION_PATTERNS)
-
     query_norm = normalize_query(text)
     query_emb = get_embedding(query_norm)
     if not query_emb:
@@ -270,10 +259,6 @@ def _get_semantic_top(text: str):
 
     results.sort(key=lambda item: item["score"], reverse=True)
 
-    definition_results = [r for r in results if is_definition(r["text"])]
-    if len(definition_results) >= 3:
-        results = definition_results
-
     seen_books = set()
     unique_results = []
 
@@ -344,18 +329,17 @@ def ask_llm(question: str, context: str | None = None) -> str:
         return _generate_with_llm(prompt)
 
     prompt = f"""
-Ответь на вопрос, используя только контекст ниже.
-Ответь на вопрос кратко и по существу.
-Если в контексте есть определение — используй его.
+Ты — ассистент, отвечающий на основе книг.
 
-Не придумывай информацию.
-Если ответа нет — скажи, что не найдено.
-
-Контекст:
+Контекст из книги:
 {context}
 
 Вопрос:
 {question}
+
+Ответь ТОЛЬКО на основе контекста.
+Если в контексте нет ответа — скажи: "в базе нет информации".
+Не придумывай информацию и не добавляй знания вне контекста.
 
 Ответ:
 """
@@ -415,31 +399,28 @@ def semantic_search_and_answer(text: str):
         {"score": score, "book_path": path, "text": chunk_text}
         for score, path, chunk_text in top
     ]
-    max_score = 0.0
-
-    if chunks:
-        max_score = max(chunk["score"] for chunk in chunks)
+    chunks.sort(key=lambda chunk: chunk["score"], reverse=True)
+    max_score = chunks[0]["score"] if chunks else 0.0
 
     indices = rerank_chunks(text, chunks)
 
     if indices:
-        context_chunks = [chunks[i] for i in indices[:3]]
+        selected_chunks = [chunks[i] for i in indices]
+        selected_chunks.sort(key=lambda chunk: chunk["score"], reverse=True)
+        context_chunks = selected_chunks[:MAX_CONTEXT_CHUNKS]
     else:
-        context_chunks = chunks[:3]
+        context_chunks = chunks[:MAX_CONTEXT_CHUNKS]
 
     has_definition = any(
         looks_like_definition(chunk["text"])
         for chunk in context_chunks
     )
 
+    print(f"[debug] chunks_found={len(chunks)}")
     print(f"[debug] max_score={max_score:.3f}")
     print(f"[debug] has_definition={has_definition}")
 
-    if (
-        not context_chunks
-        or max_score < SCORE_THRESHOLD
-        or not has_definition
-    ):
+    if not context_chunks:
         print("\n=== ANSWER ===\n")
         print("Нет надёжной информации в базе. Генерирую общий ответ...\n")
         print(ask_llm(text))
