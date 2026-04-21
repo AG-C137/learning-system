@@ -74,21 +74,33 @@ def normalize_query(query: str) -> str:
     return q
 
 
-def looks_like_definition(text: str) -> bool:
+def is_definition(text: str) -> bool:
     if not text:
         return False
 
-    t = text[:300].lower()
+    # берём только начало текста
+    snippet = text.strip()[:300]
 
-    patterns = [
-        r"^[^\.]{0,80}\s—\sэто\s",
-        r"^[^\.]{0,80}\sэто\s",
-        r"^[^\.]{0,80}\sявляется\s",
-        r"^[^\.]{0,80}\sпредставляет собой\s",
-    ]
+    # берём первое предложение
+    sentence = re.split(r"[.!?]", snippet)[0].strip()
 
-    for pattern in patterns:
-        if re.search(pattern, t):
+    # строгий паттерн:
+    # Термин — это ...
+    pattern = r"^[А-ЯA-Z][^.!?]{0,100}\s[—-]\sэто\s"
+
+    if re.search(pattern, sentence, re.IGNORECASE):
+        return True
+
+    return False
+
+
+def has_keyword(text: str, query: str) -> bool:
+    if not text or not query:
+        return False
+
+    text_lower = text.lower()
+    for word in query.lower().split():
+        if word and word in text_lower:
             return True
 
     return False
@@ -235,16 +247,8 @@ def semantic_rank(chunks: list[dict], text: str) -> list[dict]:
 
         explain_boost = 0.0
 
-        if "— это" in text_lower:
+        if is_definition(chunk_text):
             explain_boost += 0.08
-        elif " это " in text_lower:
-            explain_boost += 0.05
-
-        if "является" in text_lower:
-            explain_boost += 0.05
-
-        if "представляет собой" in text_lower:
-            explain_boost += 0.05
 
         score += explain_boost
 
@@ -362,7 +366,7 @@ def ask_llm(question: str, context: str | None = None) -> str:
         return _generate_with_llm(prompt)
 
     prompt = f"""
-Ты — ассистент, отвечающий на основе книг.
+Ты — ассистент, отвечающий на основе содержания книг.
 
 Контекст из книги:
 {context}
@@ -370,9 +374,12 @@ def ask_llm(question: str, context: str | None = None) -> str:
 Вопрос:
 {question}
 
-Ответь ТОЛЬКО на основе контекста.
-Если в контексте нет ответа — скажи: "в базе нет информации".
-Не придумывай информацию и не добавляй знания вне контекста.
+Если в контексте есть определение (формат "X — это ..."):
+— ОБЯЗАТЕЛЬНО используй его как основу ответа.
+
+Если есть несколько вариантов — выбери самый общий.
+
+Если нет информации — скажи "нет информации".
 
 Ответ:
 """
@@ -452,8 +459,13 @@ def semantic_search_and_answer(text: str, book: str | None = None, author: str |
         return
 
     chunks = semantic_rank(all_chunks, text)
-    chunks = chunks[:10]
+    keyword_chunks = [c for c in chunks if has_keyword(c["text"], text)]
+    if keyword_chunks:
+        for c in keyword_chunks:
+            c["score"] += 0.3
 
+    chunks = chunks[:50]
+    
     if not chunks:
         print("\n=== ANSWER ===\n")
         print("Не найдено в базе. Генерирую общий ответ...\n")
@@ -465,26 +477,55 @@ def semantic_search_and_answer(text: str, book: str | None = None, author: str |
 
     indices = rerank_chunks(text, chunks)
 
-    if indices:
+    if indices and len(indices) >= 3:
         selected_chunks = [chunks[i] for i in indices]
-        selected_chunks.sort(key=lambda chunk: chunk["score"], reverse=True)
-        context_chunks = selected_chunks[:MAX_CONTEXT_CHUNKS]
     else:
-        context_chunks = chunks[:MAX_CONTEXT_CHUNKS]
+        selected_chunks = chunks
 
-    has_definition = any(
-        looks_like_definition(chunk["text"])
-        for chunk in context_chunks
-    )
+    selected_chunks.sort(key=lambda chunk: chunk["score"], reverse=True)
+    context_chunks = selected_chunks[:MAX_CONTEXT_CHUNKS]
+
+    definition_chunks = [
+        c for c in context_chunks if is_definition(c["text"])
+    ]
+
+    for c in definition_chunks:
+        print("[debug] definition candidate:", c["text"][:120])
+
+    if definition_chunks:
+        # сначала определения
+        context_chunks = definition_chunks + context_chunks
+
+        # убрать дубли и ограничить
+        seen = set()
+        unique = []
+        for c in context_chunks:
+            key = c["text"][:100]
+            if key not in seen:
+                seen.add(key)
+                unique.append(c)
+
+        context_chunks = unique[:MAX_CONTEXT_CHUNKS]
 
     print(f"[debug] chunks_found={len(chunks)}")
     print(f"[debug] max_score={max_score:.3f}")
-    print(f"[debug] has_definition={has_definition}")
+    print(f"[debug] context_chunks={len(context_chunks)}")
+    print(f"[debug] has_definition={bool(definition_chunks)}")
 
     if not context_chunks:
         print("\n=== ANSWER ===\n")
         print("Нет надёжной информации в базе. Генерирую общий ответ...\n")
         print(ask_llm(text))
+        return
+
+    if definition_chunks:
+        best = sorted(definition_chunks, key=lambda c: c["score"], reverse=True)[0]
+
+        print("\n=== ANSWER ===\n")
+        print(best["text"].strip())
+
+        print("\n=== SOURCES ===\n")
+        print(f"{best['book_path']} [{best['score']:.3f}]")
         return
 
     context = "\n\n".join(chunk["text"] for chunk in context_chunks)
