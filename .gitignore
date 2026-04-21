@@ -28,3 +28,5 @@ calibre_lib/
 *.epub
 *.pdf
 *.fb2
+
+/home/ag137/Programs/learning-system/.continue
