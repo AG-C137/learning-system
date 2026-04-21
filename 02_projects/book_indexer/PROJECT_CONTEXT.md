@@ -1,14 +1,29 @@
-# Book Indexer Architecture
+# Project Context: book_indexer
 
-## Flow
-index → parse → chunk → embed → sqlite
+Это локальный RAG по книгам.
 
-## Query
-ask2 → semantic_search_and_answer → semantic_rank → ask_llm
+Стек:
 
-## Storage
-- books
-- book_chunks (embedding)
+* Python
+* SQLite
+* Ollama (LLM + embeddings)
 
-## Important
-Do NOT create new pipelines. Use existing functions.
+Основной pipeline:
+index → parse → chunk → embed → store → search → ask2
+
+ask2:
+semantic_search_and_answer:
+
+* semantic_rank
+* keyword boost
+* rerank_chunks
+* ask_llm
+
+Правила:
+
+* не менять архитектуру без причины
+* не дублировать функции
+* сначала читать код, потом писать
+
+Цель:
+сделать локальную knowledge base
