@@ -1,7 +1,14 @@
 ---
-name: New prompt
-description: New prompt
+name: Анализ функции
+description: Где реализована функция {NAME}?
 invokable: true
 ---
 
-Please write a thorough suite of unit tests for this code, making sure to cover all relevant edge cases
+@Codebase
+
+Где реализована функция {NAME}?
+Покажи:
+
+файл
+функцию
+как она вызывается

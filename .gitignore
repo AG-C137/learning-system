@@ -29,4 +29,5 @@ calibre_lib/
 *.pdf
 *.fb2
 
-/home/ag137/Programs/learning-system/.continue
+.continue/*
+!.continue/config.json
