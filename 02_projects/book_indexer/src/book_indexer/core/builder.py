@@ -80,6 +80,12 @@ def build_book(path: Path, existing_meta=None):
 
             if result.text:
                 book.raw_text = normalize_text(result.text)
+
+                print(f"[debug] raw_text_len={len(book.raw_text)}")
+
+                sample = book.raw_text[:1000].lower()
+                print(f"[debug] has_osteopat={ 'остеопат' in sample }")
+
                 book.chunks = split_into_chunks(book.raw_text)
             else:
                 book.raw_text = None

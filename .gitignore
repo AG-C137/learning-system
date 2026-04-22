@@ -28,3 +28,6 @@ calibre_lib/
 *.epub
 *.pdf
 *.fb2
+
+.continue/*
+!.continue/config.json

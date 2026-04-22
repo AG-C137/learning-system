@@ -16,20 +16,16 @@ from book_indexer.core.builder import build_book
 from book_indexer.storage.sqlite import cleanup_missing_books
 from book_indexer.storage.sqlite import get_book_file_info
 from book_indexer.storage.sqlite import init_db
+from book_indexer.storage.sqlite import load_book_metadata
 from book_indexer.storage.sqlite import mark_seen_bulk
 from book_indexer.storage.sqlite import save_index_sqlite
 from book_indexer.storage.search import search_books
 
 DB_PATH = "index.db"
-SCORE_THRESHOLD = 0.82
+MAX_CONTEXT_CHUNKS = 4
+MIN_CONTEXT_SCORE = 0.7
+MIN_DEFINITION_SCORE = 0.8
 STOPWORDS = {"что", "такое", "это", "как", "когда", "почему", "где"}
-DEFINITION_PATTERNS = [
-    "— это",
-    " это ",
-    "это ",
-    "является",
-    "представляет собой",
-]
 
 
 def cosine_similarity(a, b):
@@ -80,21 +76,33 @@ def normalize_query(query: str) -> str:
     return q
 
 
-def looks_like_definition(text: str) -> bool:
+def is_definition(text: str) -> bool:
     if not text:
         return False
 
-    t = text[:300].lower()
+    # берём только начало текста
+    snippet = text.strip()[:300]
 
-    patterns = [
-        r"^[^\.]{0,80}\s—\sэто\s",
-        r"^[^\.]{0,80}\sэто\s",
-        r"^[^\.]{0,80}\sявляется\s",
-        r"^[^\.]{0,80}\sпредставляет собой\s",
-    ]
+    # берём первое предложение
+    sentence = re.split(r"[.!?]", snippet)[0].strip()
 
-    for pattern in patterns:
-        if re.search(pattern, t):
+    # строгий паттерн:
+    # Термин — это ...
+    pattern = r"^[А-ЯA-Z][^.!?]{0,100}\s[—-]\sэто\s"
+
+    if re.search(pattern, sentence, re.IGNORECASE):
+        return True
+
+    return False
+
+
+def has_keyword(text: str, query: str) -> bool:
+    if not text or not query:
+        return False
+
+    text_lower = text.lower()
+    for word in query.lower().split():
+        if word and word in text_lower:
             return True
 
     return False
@@ -179,19 +187,7 @@ def show(text: str):
     print(f"Path: {path}")
 
 
-def _get_semantic_top(text: str):
-    def is_definition(chunk_text: str) -> bool:
-        t = chunk_text.lower()
-        return any(pattern in t for pattern in DEFINITION_PATTERNS)
-
-    query_norm = normalize_query(text)
-    query_emb = get_embedding(query_norm)
-    if not query_emb:
-        return []
-
-    query_lower = text.lower()
-    title_query = query_norm.lower()
-
+def load_chunks():
     init_db(DB_PATH)
     conn = sqlite3.connect(DB_PATH)
     cur = conn.cursor()
@@ -205,7 +201,8 @@ def _get_semantic_top(text: str):
     if not rows:
         return []
 
-    results = []
+    books_map = load_book_metadata(DB_PATH)
+    chunks = []
 
     for path, chunk_text, emb_json in rows:
         if not chunk_text or len(chunk_text) < 300:
@@ -216,21 +213,66 @@ def _get_semantic_top(text: str):
         except (TypeError, json.JSONDecodeError):
             continue
 
+        chunk = {
+            "source": path,
+            "book_path": path,
+            "text": chunk_text,
+            "embedding": emb,
+        }
+
+        meta = books_map.get(path)
+        if meta:
+            chunk["title"] = meta.get("title")
+            chunk["author"] = meta.get("author")
+
+        chunks.append(chunk)
+
+    return chunks
+
+
+def load_and_filter_chunks(book: str | None = None, author: str | None = None) -> list[dict]:
+    all_chunks = load_chunks()
+
+    if book:
+        book_lower = book.lower()
+        all_chunks = [
+            chunk
+            for chunk in all_chunks
+            if book_lower in (chunk.get("title") or "").lower()
+        ]
+
+    if author:
+        author_lower = author.lower()
+        all_chunks = [
+            chunk
+            for chunk in all_chunks
+            if author_lower in (chunk.get("author") or "").lower()
+        ]
+
+    return all_chunks
+
+
+def semantic_rank(chunks: list[dict], text: str) -> list[dict]:
+    query_norm = normalize_query(text)
+    query_emb = get_embedding(query_norm)
+    if not query_emb:
+        return []
+
+    query_lower = text.lower()
+    title_query = query_norm.lower()
+    results = []
+
+    for chunk in chunks:
+        path = chunk["book_path"]
+        chunk_text = chunk["text"]
+        emb = chunk["embedding"]
         score = cosine_similarity(query_emb, emb)
         text_lower = chunk_text.lower()
 
         explain_boost = 0.0
 
-        if "— это" in text_lower:
+        if is_definition(chunk_text):
             explain_boost += 0.08
-        elif " это " in text_lower:
-            explain_boost += 0.05
-
-        if "является" in text_lower:
-            explain_boost += 0.05
-
-        if "представляет собой" in text_lower:
-            explain_boost += 0.05
 
         score += explain_boost
 
@@ -260,6 +302,7 @@ def _get_semantic_top(text: str):
         results.append(
             {
                 "score": score,
+                "source": path,
                 "book_path": path,
                 "text": chunk_text,
             }
@@ -270,27 +313,16 @@ def _get_semantic_top(text: str):
 
     results.sort(key=lambda item: item["score"], reverse=True)
 
-    definition_results = [r for r in results if is_definition(r["text"])]
-    if len(definition_results) >= 3:
-        results = definition_results
+    return results
 
-    seen_books = set()
-    unique_results = []
 
-    for item in results:
-        book_path = item["book_path"]
-
-        if book_path in seen_books:
-            continue
-
-        seen_books.add(book_path)
-        unique_results.append(item)
-
-    results = unique_results
+def _get_semantic_top(text: str):
+    all_chunks = load_chunks()
+    ranked_chunks = semantic_rank(all_chunks, text)
 
     return [
         (item["score"], item["book_path"], item["text"])
-        for item in results[:10]
+        for item in ranked_chunks[:10]
     ]
 
 
@@ -344,18 +376,20 @@ def ask_llm(question: str, context: str | None = None) -> str:
         return _generate_with_llm(prompt)
 
     prompt = f"""
-Ответь на вопрос, используя только контекст ниже.
-Ответь на вопрос кратко и по существу.
-Если в контексте есть определение — используй его.
+Ты — ассистент, отвечающий на основе содержания книг.
 
-Не придумывай информацию.
-Если ответа нет — скажи, что не найдено.
-
-Контекст:
+Контекст из книги:
 {context}
 
 Вопрос:
 {question}
+
+Если в контексте есть определение (формат "X — это ..."):
+— ОБЯЗАТЕЛЬНО используй его как основу ответа.
+
+Если есть несколько вариантов — выбери самый общий.
+
+Если нет информации — скажи "нет информации".
 
 Ответ:
 """
@@ -403,63 +437,252 @@ def rerank_chunks(question: str, chunks: list[dict]) -> list[int]:
     return indices
 
 
-def semantic_search_and_answer(text: str):
-    top = _get_semantic_top(text)
-    if not top:
+def rank_chunks(chunks: list[dict], query: str) -> tuple[list[dict], float]:
+    chunks = semantic_rank(chunks, query)
+    keyword_chunks = [c for c in chunks if has_keyword(c["text"], query)]
+    if keyword_chunks:
+        for c in keyword_chunks:
+            c["score"] += 0.3
+
+    chunks = chunks[:50]
+    
+    chunks.sort(key=lambda chunk: chunk["score"], reverse=True)
+    max_score = chunks[0]["score"] if chunks else 0.0
+    
+    return chunks, max_score
+
+
+def rerank_and_select(chunks: list[dict], query: str) -> list[dict]:
+    # Ограничиваем входные chunks на 20 перед reranking
+    if len(chunks) > 20:
+        chunks = chunks[:20]
+    
+    indices = rerank_chunks(query, chunks)
+
+    if indices and len(indices) >= 3:
+        selected_chunks = [chunks[i] for i in indices]
+    else:
+        selected_chunks = chunks
+
+    selected_chunks.sort(key=lambda chunk: chunk["score"], reverse=True)
+    context_chunks = selected_chunks[:MAX_CONTEXT_CHUNKS]
+    
+    return context_chunks
+
+
+def filter_definitions(definition_chunks, query):
+    result = []
+
+    query_words = query.lower().split()
+
+    for c in definition_chunks:
+        text_lower = c["text"].lower()
+
+        keyword_ok = any(w in text_lower for w in query_words)
+        score_ok = c["score"] >= 0.8
+
+        if keyword_ok and score_ok:
+            result.append(c)
+
+    return result
+
+
+def process_context(context_chunks: list[dict], query: str) -> tuple[list[dict], list[dict]]:
+    definition_chunks = [
+        c for c in context_chunks if is_definition(c["text"])
+    ]
+
+    definition_chunks = filter_definitions(definition_chunks, query)
+
+    for c in definition_chunks:
+        print("[debug] definition candidate:", c["text"][:120])
+
+    if definition_chunks:
+        # сначала определения
+        context_chunks = definition_chunks + context_chunks
+
+        # убрать дубли и ограничить
+        seen = set()
+        unique = []
+        for c in context_chunks:
+            key = c["text"][:100]
+            if key not in seen:
+                seen.add(key)
+                unique.append(c)
+
+        context_chunks = unique[:MAX_CONTEXT_CHUNKS]
+
+    return context_chunks, definition_chunks
+
+
+def generate_answer(query: str, context_chunks: list[dict], definition_chunks: list[dict], book: str | None = None, author: str | None = None, is_db_empty: bool = False, max_score: float = 0.0) -> None:
+    if not context_chunks:
+        if is_db_empty:
+            print("\n=== ANSWER ===\n")
+            print("в базе нет информации")
+            return
+        else:
+            print("\n=== ANSWER ===\n")
+            print("Нет надёжной информации в базе. Генерирую общий ответ...\n")
+            if book or author:
+                source = book or author
+                context = f"Источник: {source}"
+                print(ask_llm(query, context))
+            else:
+                print(ask_llm(query))
+            return
+
+    if max_score < 0.5:
         print("\n=== ANSWER ===\n")
-        print("Не найдено в базе. Генерирую общий ответ...\n")
-        print(ask_llm(text))
+        print("Недостаточно релевантной информации в базе...\n")
+        print(ask_llm(f"""
+Ты отвечаешь на вопрос.
+
+Правила:
+- Если ты НЕ знаешь точный ответ — напиши: "не знаю"
+- НЕ делай предположений
+- НЕ интерпретируй строку
+- НЕ объясняй возможные значения
+
+Вопрос:
+{query}
+
+Ответ:
+"""))
         return
 
-    chunks = [
-        {"score": score, "book_path": path, "text": chunk_text}
-        for score, path, chunk_text in top
-    ]
-    max_score = 0.0
+    if definition_chunks:
+        best = sorted(definition_chunks, key=lambda c: c["score"], reverse=True)[0]
+        
+        # Only use definition shortcut if score is high enough
+        if best["score"] >= MIN_DEFINITION_SCORE:
+            print("\n=== ANSWER ===\n")
+            print(best["text"].strip())
+            print("\n=== SOURCES ===\n")
+            print(f"{best['book_path']} [{best['score']:.3f}]")
+            return
 
-    if chunks:
-        max_score = max(chunk["score"] for chunk in chunks)
-
-    indices = rerank_chunks(text, chunks)
-
-    if indices:
-        context_chunks = [chunks[i] for i in indices[:3]]
-    else:
-        context_chunks = chunks[:3]
-
-    has_definition = any(
-        looks_like_definition(chunk["text"])
-        for chunk in context_chunks
-    )
-
-    print(f"[debug] max_score={max_score:.3f}")
-    print(f"[debug] has_definition={has_definition}")
-
-    if (
-        not context_chunks
-        or max_score < SCORE_THRESHOLD
-        or not has_definition
-    ):
+    best_score = context_chunks[0]["score"] if context_chunks else 0.0
+    if best_score < MIN_CONTEXT_SCORE:
         print("\n=== ANSWER ===\n")
-        print("Нет надёжной информации в базе. Генерирую общий ответ...\n")
-        print(ask_llm(text))
+        print("Недостаточно релевантной информации в базе...\n")
+        print(ask_llm(f"""
+Ты отвечаешь на вопрос.
+
+Правила:
+- Если ты НЕ знаешь точный ответ — напиши: "не знаю"
+- НЕ делай предположений
+- НЕ интерпретируй строку
+- НЕ объясняй возможные значения
+
+Вопрос:
+{query}
+
+Ответ:
+"""))
         return
 
     context = "\n\n".join(chunk["text"] for chunk in context_chunks)
-    answer = ask_llm(text, context)
+    answer = ask_llm(query, context)
 
     print("\n=== ANSWER ===\n")
     print(answer)
     print("\n=== SOURCES ===\n")
+    
+    # Дедублицируем источники - выводим каждую книгу только один раз
+    seen_books = {}
     for chunk in context_chunks:
-        print(f"{chunk['book_path']} [{chunk['score']:.3f}]")
+        book_path = chunk['book_path']
+        if book_path not in seen_books:
+            seen_books[book_path] = chunk['score']
+    
+    for book_path, score in seen_books.items():
+        print(f"{book_path} [{score:.3f}]")
+
+
+def semantic_search_and_answer(text: str, book: str | None = None, author: str | None = None):
+    if book:
+        print(f"[mode] book={book}")
+    elif author:
+        print(f"[mode] author={author}")
+    else:
+        print("[mode] all")
+
+    all_chunks = load_and_filter_chunks(book=book, author=author)
+
+    if not all_chunks:
+        generate_answer(text, [], [], book=book, author=author, is_db_empty=True)
+        return
+
+    chunks, max_score = rank_chunks(all_chunks, text)
+
+    THRESHOLD = 0.7
+    if max_score < THRESHOLD:
+        print("\n=== ANSWER ===\n")
+        print("Недостаточно релевантной информации в базе...\n")
+        print(ask_llm(f"""
+Ты отвечаешь на вопрос.
+
+Правила:
+- Если ты НЕ знаешь точный ответ — напиши: "не знаю"
+- НЕ делай предположений
+- НЕ интерпретируй строку
+- НЕ объясняй возможные значения
+
+Вопрос:
+{text}
+
+Ответ:
+"""))
+        return
+
+    context_chunks = rerank_and_select(chunks, text)
+
+    context_chunks, definition_chunks = process_context(context_chunks, text)
+
+    print(f"[debug] chunks_found={len(chunks)}")
+    print(f"[debug] max_score={max_score:.3f}")
+    print(f"[debug] context_chunks={len(context_chunks)}")
+    print(f"[debug] has_definition={bool(definition_chunks)}")
+
+    generate_answer(text, context_chunks, definition_chunks, book=book, author=author, max_score=max_score)
+
+
+def _parse_ask2_args(args: list[str]) -> tuple[str | None, str | None, str | None]:
+    book = None
+    author = None
+    query_parts = []
+    i = 0
+
+    while i < len(args):
+        arg = args[i]
+
+        if arg == "--book":
+            if i + 1 >= len(args):
+                return None, None, None
+            book = args[i + 1]
+            i += 2
+            continue
+
+        if arg == "--author":
+            if i + 1 >= len(args):
+                return None, None, None
+            author = args[i + 1]
+            i += 2
+            continue
+
+        query_parts.append(arg)
+        i += 1
+
+    query = " ".join(query_parts).strip()
+    return query or None, book, author
 
 
 def main():
     print("cli started")
 
     if len(sys.argv) < 2:
-        print("commands: index | search | show | ask | ask2")
+        print("commands: index | search | show | ask | ask2 [--book NAME] [--author NAME] <query>")
         return
 
     cmd = sys.argv[1]
@@ -485,11 +708,12 @@ def main():
 
         semantic_search(" ".join(sys.argv[2:]))
     elif cmd == "ask2":
-        if len(sys.argv) < 3:
+        query, book, author = _parse_ask2_args(sys.argv[2:])
+        if not query:
             print("need query")
             return
 
-        semantic_search_and_answer(" ".join(sys.argv[2:]))
+        semantic_search_and_answer(query, book=book, author=author)
 
 
 if __name__ == "__main__":

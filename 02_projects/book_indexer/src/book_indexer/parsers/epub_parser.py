@@ -8,7 +8,7 @@ import xml.etree.ElementTree as ET
 
 from .base import ParseResult
 
-TEXT_LIMIT = 50_000
+TEXT_LIMIT = 300_000
 
 
 class _HTMLTextExtractor(HTMLParser):
@@ -132,7 +132,7 @@ class EPUBParser:
                 continue
 
             text = self._strip_html(html_data)
-            if not text or len(text) < 200:
+            if not text or len(text) < 50:
                 continue
 
             words = text.split()
@@ -140,11 +140,7 @@ class EPUBParser:
                 continue
 
             lower_text = text.lower()
-            if lower_text.count("\n") > 20 and any(
-                x in lower_text for x in ["глава", "chapter", "contents"]
-            ):
-                continue
-
+            
             remaining = TEXT_LIMIT - total
             if remaining <= 0:
                 break
@@ -154,9 +150,7 @@ class EPUBParser:
             total += len(piece) + 1
             chunks += 1
 
-            if chunks >= 15:
-                break
-
+            
             if total >= TEXT_LIMIT and chunks >= 1:
                 break
 
