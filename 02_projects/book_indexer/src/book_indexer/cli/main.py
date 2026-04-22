@@ -228,6 +228,28 @@ def load_chunks():
     return chunks
 
 
+def load_and_filter_chunks(book: str | None = None, author: str | None = None) -> list[dict]:
+    all_chunks = load_chunks()
+
+    if book:
+        book_lower = book.lower()
+        all_chunks = [
+            chunk
+            for chunk in all_chunks
+            if book_lower in (chunk.get("title") or "").lower()
+        ]
+
+    if author:
+        author_lower = author.lower()
+        all_chunks = [
+            chunk
+            for chunk in all_chunks
+            if author_lower in (chunk.get("author") or "").lower()
+        ]
+
+    return all_chunks
+
+
 def semantic_rank(chunks: list[dict], text: str) -> list[dict]:
     query_norm = normalize_query(text)
     query_emb = get_embedding(query_norm)
@@ -427,55 +449,23 @@ def rerank_chunks(question: str, chunks: list[dict]) -> list[int]:
     return indices
 
 
-def semantic_search_and_answer(text: str, book: str | None = None, author: str | None = None):
-    if book:
-        print(f"[mode] book={book}")
-    elif author:
-        print(f"[mode] author={author}")
-    else:
-        print("[mode] all")
-
-    all_chunks = load_chunks()
-
-    if book:
-        book_lower = book.lower()
-        all_chunks = [
-            chunk
-            for chunk in all_chunks
-            if book_lower in (chunk.get("title") or "").lower()
-        ]
-
-    if author:
-        author_lower = author.lower()
-        all_chunks = [
-            chunk
-            for chunk in all_chunks
-            if author_lower in (chunk.get("author") or "").lower()
-        ]
-
-    if not all_chunks:
-        print("\n=== ANSWER ===\n")
-        print("в базе нет информации")
-        return
-
-    chunks = semantic_rank(all_chunks, text)
-    keyword_chunks = [c for c in chunks if has_keyword(c["text"], text)]
+def rank_chunks(chunks: list[dict], query: str) -> tuple[list[dict], float]:
+    chunks = semantic_rank(chunks, query)
+    keyword_chunks = [c for c in chunks if has_keyword(c["text"], query)]
     if keyword_chunks:
         for c in keyword_chunks:
             c["score"] += 0.3
 
     chunks = chunks[:50]
     
-    if not chunks:
-        print("\n=== ANSWER ===\n")
-        print("Не найдено в базе. Генерирую общий ответ...\n")
-        print(ask_llm(text))
-        return
-
     chunks.sort(key=lambda chunk: chunk["score"], reverse=True)
     max_score = chunks[0]["score"] if chunks else 0.0
+    
+    return chunks, max_score
 
-    indices = rerank_chunks(text, chunks)
+
+def rerank_and_select(chunks: list[dict], query: str) -> list[dict]:
+    indices = rerank_chunks(query, chunks)
 
     if indices and len(indices) >= 3:
         selected_chunks = [chunks[i] for i in indices]
@@ -484,7 +474,11 @@ def semantic_search_and_answer(text: str, book: str | None = None, author: str |
 
     selected_chunks.sort(key=lambda chunk: chunk["score"], reverse=True)
     context_chunks = selected_chunks[:MAX_CONTEXT_CHUNKS]
+    
+    return context_chunks
 
+
+def process_context(context_chunks: list[dict]) -> tuple[list[dict], list[dict]]:
     definition_chunks = [
         c for c in context_chunks if is_definition(c["text"])
     ]
@@ -507,16 +501,25 @@ def semantic_search_and_answer(text: str, book: str | None = None, author: str |
 
         context_chunks = unique[:MAX_CONTEXT_CHUNKS]
 
-    print(f"[debug] chunks_found={len(chunks)}")
-    print(f"[debug] max_score={max_score:.3f}")
-    print(f"[debug] context_chunks={len(context_chunks)}")
-    print(f"[debug] has_definition={bool(definition_chunks)}")
+    return context_chunks, definition_chunks
 
+
+def generate_answer(query: str, context_chunks: list[dict], definition_chunks: list[dict], book: str | None = None, author: str | None = None, is_db_empty: bool = False) -> None:
     if not context_chunks:
-        print("\n=== ANSWER ===\n")
-        print("Нет надёжной информации в базе. Генерирую общий ответ...\n")
-        print(ask_llm(text))
-        return
+        if is_db_empty:
+            print("\n=== ANSWER ===\n")
+            print("в базе нет информации")
+            return
+        else:
+            print("\n=== ANSWER ===\n")
+            print("Нет надёжной информации в базе. Генерирую общий ответ...\n")
+            if book or author:
+                source = book or author
+                context = f"Источник: {source}"
+                print(ask_llm(query, context))
+            else:
+                print(ask_llm(query))
+            return
 
     if definition_chunks:
         best = sorted(definition_chunks, key=lambda c: c["score"], reverse=True)[0]
@@ -529,13 +532,41 @@ def semantic_search_and_answer(text: str, book: str | None = None, author: str |
         return
 
     context = "\n\n".join(chunk["text"] for chunk in context_chunks)
-    answer = ask_llm(text, context)
+    answer = ask_llm(query, context)
 
     print("\n=== ANSWER ===\n")
     print(answer)
     print("\n=== SOURCES ===\n")
     for chunk in context_chunks:
         print(f"{chunk['book_path']} [{chunk['score']:.3f}]")
+
+
+def semantic_search_and_answer(text: str, book: str | None = None, author: str | None = None):
+    if book:
+        print(f"[mode] book={book}")
+    elif author:
+        print(f"[mode] author={author}")
+    else:
+        print("[mode] all")
+
+    all_chunks = load_and_filter_chunks(book=book, author=author)
+
+    if not all_chunks:
+        generate_answer(text, [], [], book=book, author=author, is_db_empty=True)
+        return
+
+    chunks, max_score = rank_chunks(all_chunks, text)
+
+    context_chunks = rerank_and_select(chunks, text)
+
+    context_chunks, definition_chunks = process_context(context_chunks)
+
+    print(f"[debug] chunks_found={len(chunks)}")
+    print(f"[debug] max_score={max_score:.3f}")
+    print(f"[debug] context_chunks={len(context_chunks)}")
+    print(f"[debug] has_definition={bool(definition_chunks)}")
+
+    generate_answer(text, context_chunks, definition_chunks, book=book, author=author)
 
 
 def _parse_ask2_args(args: list[str]) -> tuple[str | None, str | None, str | None]:
