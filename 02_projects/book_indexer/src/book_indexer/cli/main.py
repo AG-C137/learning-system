@@ -23,6 +23,8 @@ from book_indexer.storage.search import search_books
 
 DB_PATH = "index.db"
 MAX_CONTEXT_CHUNKS = 4
+MIN_CONTEXT_SCORE = 0.7
+MIN_DEFINITION_SCORE = 0.8
 STOPWORDS = {"что", "такое", "это", "как", "когда", "почему", "где"}
 
 
@@ -311,20 +313,6 @@ def semantic_rank(chunks: list[dict], text: str) -> list[dict]:
 
     results.sort(key=lambda item: item["score"], reverse=True)
 
-    seen_books = set()
-    unique_results = []
-
-    for item in results:
-        book_path = item["book_path"]
-
-        if book_path in seen_books:
-            continue
-
-        seen_books.add(book_path)
-        unique_results.append(item)
-
-    results = unique_results
-
     return results
 
 
@@ -465,6 +453,10 @@ def rank_chunks(chunks: list[dict], query: str) -> tuple[list[dict], float]:
 
 
 def rerank_and_select(chunks: list[dict], query: str) -> list[dict]:
+    # Ограничиваем входные chunks на 20 перед reranking
+    if len(chunks) > 20:
+        chunks = chunks[:20]
+    
     indices = rerank_chunks(query, chunks)
 
     if indices and len(indices) >= 3:
@@ -478,10 +470,29 @@ def rerank_and_select(chunks: list[dict], query: str) -> list[dict]:
     return context_chunks
 
 
-def process_context(context_chunks: list[dict]) -> tuple[list[dict], list[dict]]:
+def filter_definitions(definition_chunks, query):
+    result = []
+
+    query_words = query.lower().split()
+
+    for c in definition_chunks:
+        text_lower = c["text"].lower()
+
+        keyword_ok = any(w in text_lower for w in query_words)
+        score_ok = c["score"] >= 0.8
+
+        if keyword_ok and score_ok:
+            result.append(c)
+
+    return result
+
+
+def process_context(context_chunks: list[dict], query: str) -> tuple[list[dict], list[dict]]:
     definition_chunks = [
         c for c in context_chunks if is_definition(c["text"])
     ]
+
+    definition_chunks = filter_definitions(definition_chunks, query)
 
     for c in definition_chunks:
         print("[debug] definition candidate:", c["text"][:120])
@@ -504,7 +515,7 @@ def process_context(context_chunks: list[dict]) -> tuple[list[dict], list[dict]]
     return context_chunks, definition_chunks
 
 
-def generate_answer(query: str, context_chunks: list[dict], definition_chunks: list[dict], book: str | None = None, author: str | None = None, is_db_empty: bool = False) -> None:
+def generate_answer(query: str, context_chunks: list[dict], definition_chunks: list[dict], book: str | None = None, author: str | None = None, is_db_empty: bool = False, max_score: float = 0.0) -> None:
     if not context_chunks:
         if is_db_empty:
             print("\n=== ANSWER ===\n")
@@ -521,14 +532,54 @@ def generate_answer(query: str, context_chunks: list[dict], definition_chunks: l
                 print(ask_llm(query))
             return
 
+    if max_score < 0.5:
+        print("\n=== ANSWER ===\n")
+        print("Недостаточно релевантной информации в базе...\n")
+        print(ask_llm(f"""
+Ты отвечаешь на вопрос.
+
+Правила:
+- Если ты НЕ знаешь точный ответ — напиши: "не знаю"
+- НЕ делай предположений
+- НЕ интерпретируй строку
+- НЕ объясняй возможные значения
+
+Вопрос:
+{query}
+
+Ответ:
+"""))
+        return
+
     if definition_chunks:
         best = sorted(definition_chunks, key=lambda c: c["score"], reverse=True)[0]
+        
+        # Only use definition shortcut if score is high enough
+        if best["score"] >= MIN_DEFINITION_SCORE:
+            print("\n=== ANSWER ===\n")
+            print(best["text"].strip())
+            print("\n=== SOURCES ===\n")
+            print(f"{best['book_path']} [{best['score']:.3f}]")
+            return
 
+    best_score = context_chunks[0]["score"] if context_chunks else 0.0
+    if best_score < MIN_CONTEXT_SCORE:
         print("\n=== ANSWER ===\n")
-        print(best["text"].strip())
+        print("Недостаточно релевантной информации в базе...\n")
+        print(ask_llm(f"""
+Ты отвечаешь на вопрос.
 
-        print("\n=== SOURCES ===\n")
-        print(f"{best['book_path']} [{best['score']:.3f}]")
+Правила:
+- Если ты НЕ знаешь точный ответ — напиши: "не знаю"
+- НЕ делай предположений
+- НЕ интерпретируй строку
+- НЕ объясняй возможные значения
+
+Вопрос:
+{query}
+
+Ответ:
+"""))
         return
 
     context = "\n\n".join(chunk["text"] for chunk in context_chunks)
@@ -537,8 +588,16 @@ def generate_answer(query: str, context_chunks: list[dict], definition_chunks: l
     print("\n=== ANSWER ===\n")
     print(answer)
     print("\n=== SOURCES ===\n")
+    
+    # Дедублицируем источники - выводим каждую книгу только один раз
+    seen_books = {}
     for chunk in context_chunks:
-        print(f"{chunk['book_path']} [{chunk['score']:.3f}]")
+        book_path = chunk['book_path']
+        if book_path not in seen_books:
+            seen_books[book_path] = chunk['score']
+    
+    for book_path, score in seen_books.items():
+        print(f"{book_path} [{score:.3f}]")
 
 
 def semantic_search_and_answer(text: str, book: str | None = None, author: str | None = None):
@@ -557,16 +616,36 @@ def semantic_search_and_answer(text: str, book: str | None = None, author: str |
 
     chunks, max_score = rank_chunks(all_chunks, text)
 
+    THRESHOLD = 0.7
+    if max_score < THRESHOLD:
+        print("\n=== ANSWER ===\n")
+        print("Недостаточно релевантной информации в базе...\n")
+        print(ask_llm(f"""
+Ты отвечаешь на вопрос.
+
+Правила:
+- Если ты НЕ знаешь точный ответ — напиши: "не знаю"
+- НЕ делай предположений
+- НЕ интерпретируй строку
+- НЕ объясняй возможные значения
+
+Вопрос:
+{text}
+
+Ответ:
+"""))
+        return
+
     context_chunks = rerank_and_select(chunks, text)
 
-    context_chunks, definition_chunks = process_context(context_chunks)
+    context_chunks, definition_chunks = process_context(context_chunks, text)
 
     print(f"[debug] chunks_found={len(chunks)}")
     print(f"[debug] max_score={max_score:.3f}")
     print(f"[debug] context_chunks={len(context_chunks)}")
     print(f"[debug] has_definition={bool(definition_chunks)}")
 
-    generate_answer(text, context_chunks, definition_chunks, book=book, author=author)
+    generate_answer(text, context_chunks, definition_chunks, book=book, author=author, max_score=max_score)
 
 
 def _parse_ask2_args(args: list[str]) -> tuple[str | None, str | None, str | None]:
