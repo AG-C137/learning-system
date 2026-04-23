@@ -1,0 +1,75 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <title>Book Indexer</title>
+</head>
+<body>
+
+<h2>Book AI</h2>
+
+<input id="query" placeholder="Введите вопрос..." style="width: 400px;">
+<br><br>
+
+<input id="book" placeholder="Книга (опционально)">
+<input id="author" placeholder="Автор (опционально)">
+<br><br>
+
+<button onclick="ask()">Спросить</button>
+
+<h3>Ответ:</h3>
+<pre id="answer"></pre>
+<p id="confidence"></p>
+
+<h3>Источники:</h3>
+<ul id="sources"></ul>
+
+<script>
+async function ask() {
+    const query = document.getElementById("query").value;
+    const book = document.getElementById("book").value;
+    const author = document.getElementById("author").value;
+
+    const res = await fetch("http://127.0.0.1:8000/ask", {
+        method: "POST",
+        headers: {
+            "Content-Type": "application/json"
+        },
+        body: JSON.stringify({
+            query: query,
+            book: book || null,
+            author: author || null
+        })
+    });
+
+    const data = await res.json();
+
+    document.getElementById("answer").textContent = data.answer;
+    document.getElementById("confidence").textContent =
+        `Уверенность: ${Number(data.confidence || 0).toFixed(2)}`;
+
+    const sourcesEl = document.getElementById("sources");
+    sourcesEl.innerHTML = "";
+
+    const sources = data.sources || [];
+
+    if (sources.length === 0) {
+        const li = document.createElement("li");
+        li.textContent = "Нет релевантной информации";
+        sourcesEl.appendChild(li);
+        return;
+    }
+
+    sources.forEach(s => {
+        const li = document.createElement("li");
+        const title = s.title || "[no title]";
+        const author = s.author || "[no author]";
+        const score = Number(s.score || 0).toFixed(2);
+        li.textContent = `${title} — ${author} score: ${score}`;
+        sourcesEl.appendChild(li);
+    });
+}
+</script>
+
+</body>
+</html>

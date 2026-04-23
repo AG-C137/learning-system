@@ -31,3 +31,4 @@ calibre_lib/
 
 .continue/*
 !.continue/config.json
+.vscode/settings.json
